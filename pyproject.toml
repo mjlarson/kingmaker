@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools",]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = 'kingmaker'
+description='A library for building and using King/Moffat distributions for point source analyses'
+readme = "README.md"
+authors= [ {name='Michael Larson', email='mlarson@icecube.wisc.edu'} ]
+dependencies = [
+    'numpy < 2',
+    'scipy',
+    'ducc0',
+    'healpy',
+]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+dev = [
+  "pre-commit",
+  "ruff",
+]
+
+[project.urls]
+Documentation = "https://docs.icecube.aq/csky/main/"
+Source = "https://github.com/mlarson/kingmaker/"
+
+[tool.setuptools]
+packages=['kingmaker']
+zip-safe=false
+
+[tool.ruff]
+line-length = 100
+include = ["*.py", "**/pyproject.toml"]
+# Skip def vs lambda rule, .
+ignore = ["E731"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.ruff.lint.per-file-ignores]
+# Ignore unused variable, import location, def vs lambda,  for tests
+"tests/**.py" = ["F841", "E402", "E731"]
