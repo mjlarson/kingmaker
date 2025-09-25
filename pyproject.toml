@@ -23,7 +23,7 @@ dev = [
 
 [project.urls]
 Documentation = "https://docs.icecube.aq/csky/main/"
-Source = "https://github.com/mlarson/kingmaker/"
+Source = "https://github.com/mjlarson/kingmaker/"
 
 [tool.setuptools]
 packages=['kingmaker']
