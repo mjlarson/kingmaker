@@ -1,7 +1,6 @@
 import numpy as np
-from numba import njit, vectorize, float32, float64
+from numba import vectorize, float32, float64
 
-from .utils import adaptive_bins
 _log10pi = np.log10(np.pi)
 
 @vectorize([float32(float32,float32,float32), float64(float64,float64,float64)], 
@@ -55,7 +54,6 @@ def _unnormalized_cdf(x, alpha, beta):
         King function CDF value with units of probability.
     """
     # Define the grid points for the evaluation. Add some padding to the maximum.
-    integral_max = min([x, _log10pi])
     points = np.append([0.0,], np.logspace(_log10pi-5, _log10pi, 1000))
     
     # Use the unnormalized PDF (given in 1/sr) and scale by the annulus area (~cos(dx))

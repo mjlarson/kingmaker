@@ -1,0 +1,581 @@
+import numpy as np
+from scipy.optimize import least_squares
+
+from .pdf import InterpolatedKingPDF
+from .utils import angular_distance
+
+
+class KingPSFFitter:
+    """
+    Fit King PSF parameters to simulated signal events in arbitrary dimensions.
+
+    This class bins signal Monte Carlo events along user-specified observables
+    and fits King distribution parameters (alpha, beta) to the angular error
+    distribution in each bin.
+
+    Parameters
+    ----------
+    signal_events : structured array
+        Numpy structured array containing signal MC events. Must include:
+        - 'ra', 'dec': reconstructed coordinates (radians)
+        - 'true_ra', 'true_dec': true coordinates (radians)
+        Additional fields can be used for parameterization binning.
+    parametrization_bins : dict
+        Dictionary mapping observable names to bin edges or number of bins.
+        Keys must correspond to fields in signal_events.
+        Values can be:
+        - int: number of equal-probability bins
+        - array-like: explicit bin edges
+    dpsi_nbins : int, optional
+        Number of bins in angular error (dpsi) for fitting. Default is 101.
+    minimum_counts : int, optional
+        Minimum number of events required in a bin for fitting. Default is 100.
+    weight_field : str, optional
+        Field name for event weights. If None, equal weights are used.
+    spectral_indices : array-like, optional
+        Spectral indices (gamma) for reweighting. Default is [2.0].
+    angular_cutoff : float, optional
+        Maximum angular separation for King PDF. Default is pi.
+
+    Attributes
+    ----------
+    fit_alpha : ndarray
+        Fitted alpha parameters for each bin.
+    fit_beta : ndarray
+        Fitted beta parameters for each bin.
+    histograms : ndarray
+        Histogram values for each bin.
+    uncertainties : ndarray
+        Histogram uncertainties for each bin.
+    dpsi_bins : ndarray
+        Angular error bin edges for each bin.
+    fit_quality : ndarray
+        Chi-square values indicating fit quality.
+    """
+
+    def __init__(
+        self,
+        signal_events,
+        parametrization_bins,
+        dpsi_nbins=101,
+        minimum_counts=100,
+        weight_field=None,
+        spectral_indices=None,
+        angular_cutoff=np.pi,
+    ):
+        """Initialize the KingPSFFitter."""
+        self.signal_events = signal_events
+        self.weight_field = weight_field
+        self.dpsi_nbins = dpsi_nbins
+        self.minimum_counts = minimum_counts
+        self.spectral_indices = (
+            np.atleast_1d(spectral_indices) if spectral_indices is not None else np.array([2.0])
+        )
+        self.angular_cutoff = angular_cutoff
+
+        # Initialize King PDF
+        self.king_pdf = InterpolatedKingPDF(angular_cutoff=angular_cutoff)
+
+        # Validate and setup binning
+        self._validate_fields(parametrization_bins)
+        self.parametrization_bins = self._setup_bins(parametrization_bins)
+        self.bin_names = list(self.parametrization_bins.keys())
+        self.parametrization_shape = [len(bins) - 1 for bins in self.parametrization_bins.values()]
+
+        # Calculate angular distances
+        self.dpsi = angular_distance(
+            self.signal_events["ra"],
+            self.signal_events["dec"],
+            self.signal_events["true_ra"],
+            self.signal_events["true_dec"],
+        )
+
+        # Bin events
+        self.event_indices = self._bin_events()
+
+        # Initialize storage arrays
+        self._initialize_storage()
+
+    def _validate_fields(self, parametrization_bins):
+        """
+        Validate that required and parameterization fields exist in signal events.
+
+        Parameters
+        ----------
+        parametrization_bins : dict
+            Dictionary of binning specifications.
+
+        Raises
+        ------
+        ValueError
+            If required fields are missing.
+        """
+        required_fields = ["ra", "dec", "true_ra", "true_dec"]
+        missing_required = [f for f in required_fields if f not in self.signal_events.dtype.names]
+        if missing_required:
+            raise ValueError(f"Signal events missing required fields: {missing_required}")
+
+        missing_params = [
+            key for key in parametrization_bins.keys() if key not in self.signal_events.dtype.names
+        ]
+        if missing_params:
+            available = self.signal_events.dtype.names
+            raise ValueError(
+                f"Parametrization fields {missing_params} not found in signal events. "
+                f"Available fields: {available}"
+            )
+
+        if self.weight_field is not None and (
+            self.weight_field not in self.signal_events.dtype.names
+        ):
+            raise ValueError(f"Weight field '{self.weight_field}' not found in signal events.")
+
+    def _setup_bins(self, parametrization_bins):
+        """
+        Convert binning specifications to explicit bin edges.
+
+        Parameters
+        ----------
+        parametrization_bins : dict
+            Dictionary mapping field names to bin specs (int or array).
+
+        Returns
+        -------
+        dict
+            Dictionary mapping field names to bin edge arrays.
+        """
+        bins_dict = {}
+        for key, val in parametrization_bins.items():
+            if isinstance(val, int):
+                # Create equal-probability bins
+                bins_dict[key] = self._get_percentile_bins(val, self.signal_events[key])
+            elif isinstance(val, (tuple, list, np.ndarray)):
+                bins_dict[key] = np.asarray(val)
+            else:
+                raise ValueError(
+                    f"Unknown binning specification for '{key}': {val}. "
+                    "Use int for number of bins or array-like for bin edges."
+                )
+        return bins_dict
+
+    def _get_percentile_bins(self, nbins, values, weights=None):
+        """
+        Create bins with approximately equal number of (weighted) events.
+
+        Parameters
+        ----------
+        nbins : int
+            Number of bins to create.
+        values : ndarray
+            Values to bin.
+        weights : ndarray, optional
+            Event weights. If None, equal weights used.
+
+        Returns
+        -------
+        ndarray
+            Bin edges.
+        """
+        if weights is None:
+            weights = np.ones(len(values))
+
+        # Sort and create cumulative distribution
+        sorted_idx = np.argsort(values)
+        cumulative = np.cumsum(weights[sorted_idx]) / weights.sum()
+
+        # Find bin edges at equal probability intervals
+        percentiles = np.linspace(0, 1, nbins + 1)
+        positions = np.searchsorted(cumulative, percentiles)
+        positions = np.clip(positions, 0, len(values) - 1)
+
+        # Handle duplicates by using unique values
+        positions = np.unique(positions)
+        bin_edges = values[sorted_idx][positions]
+
+        # Ensure we have at least 2 edges (1 bin)
+        if len(bin_edges) < 2:
+            return np.array([values.min(), values.max()])
+
+        return bin_edges
+
+    def _bin_events(self):
+        """
+        Assign each event to a bin index for each parameterization dimension.
+
+        Returns
+        -------
+        dict
+            Dictionary mapping field names to bin indices for each event.
+        """
+        event_indices = {}
+        for key, bins in self.parametrization_bins.items():
+            event_indices[key] = np.digitize(self.signal_events[key], bins)
+        return event_indices
+
+    def _initialize_storage(self):
+        """Initialize arrays to store fit results and diagnostics."""
+        shape_with_gamma = [len(self.spectral_indices)] + self.parametrization_shape
+
+        # Fit parameters
+        self.fit_alpha = np.full(shape_with_gamma, np.median(self.dpsi))
+        self.fit_beta = np.full(shape_with_gamma, 2.25)
+
+        # Diagnostics
+        self.histograms = np.zeros(shape_with_gamma + [self.dpsi_nbins], dtype=float)
+        self.uncertainties = np.zeros(shape_with_gamma + [self.dpsi_nbins], dtype=float)
+        self.dpsi_bins = np.zeros(shape_with_gamma + [self.dpsi_nbins + 1], dtype=float)
+        self.fit_quality = np.zeros(shape_with_gamma, dtype=float)
+        self.event_counts = np.zeros(shape_with_gamma, dtype=int)
+
+    def fit_all_bins(self, verbose=True):
+        """
+        Fit King PSF parameters in all bins.
+
+        Iterates over all bins defined by parametrization_bins and spectral_indices,
+        fitting King distribution parameters to the angular error distribution.
+
+        Parameters
+        ----------
+        verbose : bool, optional
+            Print progress information. Default is True.
+
+        Returns
+        -------
+        dict
+            Dictionary containing fit results with keys:
+            - 'alpha': fit_alpha array
+            - 'beta': fit_beta array
+            - 'histograms': histogram values
+            - 'uncertainties': histogram uncertainties
+            - 'dpsi_bins': angular error bin edges
+            - 'fit_quality': chi-square values
+            - 'event_counts': number of events per bin
+        """
+        if verbose:
+            print(f"Fitting King PSF in {np.prod(self.parametrization_shape)} bins...")
+            print(f"  Spectral indices: {self.spectral_indices}")
+            print(f"  Binning dimensions: {self.bin_names}")
+
+        # Get base weights
+        if self.weight_field is not None:
+            base_weights = self.signal_events[self.weight_field]
+        else:
+            base_weights = np.ones(len(self.signal_events))
+
+        # Iterate over spectral indices
+        for g_idx, gamma in enumerate(self.spectral_indices):
+            if verbose:
+                print(f"\n  Spectral index γ = {gamma:.2f}")
+
+            # Calculate spectral weights if energy field exists
+            if "true_energy" in self.signal_events.dtype.names:
+                weights = base_weights * self.signal_events["true_energy"] ** (-gamma)
+            else:
+                weights = base_weights.copy()
+
+            # Iterate over all bin combinations
+            n_fitted = 0
+            n_skipped = 0
+
+            for bin_indices in np.ndindex(*self.parametrization_shape):
+                # Create mask for events in this bin
+                mask = np.ones(len(weights), dtype=bool)
+                for i, key in enumerate(self.bin_names):
+                    # bin_indices are 0-based, but digitize returns 1-based
+                    mask &= self.event_indices[key] == bin_indices[i] + 1
+
+                n_events = mask.sum()
+                param_idx = tuple([g_idx] + list(bin_indices))
+                self.event_counts[param_idx] = n_events
+
+                # Skip if insufficient events
+                if n_events < self.minimum_counts:
+                    n_skipped += 1
+                    continue
+
+                # Fit this bin
+                success = self._fit_single_bin(mask, weights, param_idx)
+                if success:
+                    n_fitted += 1
+                else:
+                    n_skipped += 1
+
+            if verbose:
+                print(f"    Fitted {n_fitted} bins, skipped {n_skipped} bins")
+
+        if verbose:
+            print("\nFitting complete!")
+
+        return {
+            "alpha": self.fit_alpha,
+            "beta": self.fit_beta,
+            "histograms": self.histograms,
+            "uncertainties": self.uncertainties,
+            "dpsi_bins": self.dpsi_bins,
+            "fit_quality": self.fit_quality,
+            "event_counts": self.event_counts,
+        }
+
+    def _fit_single_bin(self, mask, weights, param_idx):
+        """
+        Fit King parameters for a single bin.
+
+        Parameters
+        ----------
+        mask : ndarray
+            Boolean mask selecting events in this bin.
+        weights : ndarray
+            Event weights.
+        param_idx : tuple
+            Index tuple for storing results.
+
+        Returns
+        -------
+        bool
+            True if fit succeeded, False otherwise.
+        """
+        # Extract events in this bin
+        masked_dpsi = self.dpsi[mask]
+        masked_weights = weights[mask]
+        masked_weights /= masked_weights.sum()  # Normalize
+
+        # Create bins for this subset
+        dpsi_bins = self._get_percentile_bins(self.dpsi_nbins, masked_dpsi, masked_weights)
+        dpsi_bins = np.unique(dpsi_bins)
+
+        # If we don't have enough bins, skip
+        if len(dpsi_bins) < 3:
+            return False
+
+        bin_centers = (dpsi_bins[:-1] + dpsi_bins[1:]) / 2
+
+        # Create weighted histogram
+        hist, _ = np.histogram(masked_dpsi, bins=dpsi_bins, weights=masked_weights)
+        hist2, _ = np.histogram(masked_dpsi, bins=dpsi_bins, weights=masked_weights**2)
+
+        # Normalize by bin width to get density
+        delta = np.diff(dpsi_bins)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            hist = hist / delta
+            hist2 = hist2 / delta**2
+
+        # Get initial guess from peak location
+        alpha_guess = bin_centers[np.argmax(hist)]
+
+        # Try multiple starting points to find best fit
+        best_params = None
+        best_chi2 = np.inf
+
+        test_alphas = alpha_guess * np.array([0.5, 0.75, 1.0, 1.25, 1.5])
+        test_betas = np.array([1.5, 2.0, 2.5, 3.0, 4.0])
+
+        for alpha_0 in test_alphas:
+            for beta_0 in test_betas:
+                try:
+                    params, chi2 = self._fit_histogram(
+                        hist, bin_centers, hist2, alpha_guess=alpha_0, beta_guess=beta_0
+                    )
+
+                    if chi2 < best_chi2:
+                        best_chi2 = chi2
+                        best_params = params
+
+                    # Early stopping if we're climbing out of minimum
+                    if chi2 > best_chi2 * 1.5:
+                        break
+
+                except (ValueError, RuntimeError):
+                    continue
+
+        # Store results if we found a solution
+        if best_params is not None:
+            self.fit_alpha[param_idx] = best_params[0]
+            self.fit_beta[param_idx] = best_params[1]
+            self.fit_quality[param_idx] = best_chi2
+
+            # Store histogram data (pad/truncate to match storage size)
+            n_store = min(len(hist), self.dpsi_nbins)
+            self.histograms[param_idx][:n_store] = hist[:n_store]
+            self.uncertainties[param_idx][:n_store] = np.sqrt(hist2[:n_store])
+            self.dpsi_bins[param_idx][: len(dpsi_bins)] = dpsi_bins
+
+            return True
+
+        return False
+
+    def _fit_histogram(self, hist_vals, bin_centers, err2, alpha_guess, beta_guess):
+        """
+        Fit King PDF to a histogram using least squares.
+
+        Parameters
+        ----------
+        hist_vals : ndarray
+            Histogram values (density).
+        bin_centers : ndarray
+            Bin center positions.
+        err2 : ndarray
+            Squared uncertainties on histogram values.
+        alpha_guess : float
+            Initial guess for alpha parameter.
+        beta_guess : float
+            Initial guess for beta parameter.
+
+        Returns
+        -------
+        params : ndarray
+            Fitted parameters [alpha, beta].
+        chi2 : float
+            Chi-square value of the fit.
+        """
+
+        def residuals(params):
+            alpha, beta = params
+            # Evaluate King PDF at bin centers
+            expected = self.king_pdf.pdf(bin_centers, alpha, beta)
+            # Normalize to match histogram integral
+            expected *= hist_vals.sum() / expected.sum()
+            # Compute chi-square residuals
+            res = (hist_vals - expected) ** 2 / (err2 + 1e-6)
+            return res
+
+        initial_guess = [alpha_guess, beta_guess]
+
+        # Set reasonable bounds
+        alpha_min = max(1e-4, alpha_guess / 10)
+        alpha_max = min(np.pi, alpha_guess * 10)
+        beta_min = 1.0
+        beta_max = 100.0
+
+        result = least_squares(
+            residuals, initial_guess, bounds=([alpha_min, beta_min], [alpha_max, beta_max])
+        )
+
+        return result.x, np.sum(result.fun)
+
+    def get_interpolator(self, gamma_index=0):
+        """
+        Get an interpolator for fitted parameters at a given spectral index.
+
+        Parameters
+        ----------
+        gamma_index : int, optional
+            Index of the spectral index to use. Default is 0.
+
+        Returns
+        -------
+        tuple
+            (alpha_interpolator, beta_interpolator) functions that interpolate
+            fitted parameters based on parameterization bin values.
+
+        Notes
+        -----
+        Requires scipy.interpolate.RegularGridInterpolator (not imported by default
+        to avoid dependency). This method will raise ImportError if scipy is not available.
+        """
+        from scipy.interpolate import RegularGridInterpolator
+
+        # Get bin centers for each dimension
+        bin_centers = []
+        for key in self.bin_names:
+            bins = self.parametrization_bins[key]
+            centers = (bins[:-1] + bins[1:]) / 2
+            bin_centers.append(centers)
+
+        # Create interpolators
+        alpha_interp = RegularGridInterpolator(
+            tuple(bin_centers),
+            self.fit_alpha[gamma_index],
+            bounds_error=False,
+            fill_value=None,  # Extrapolate
+        )
+
+        beta_interp = RegularGridInterpolator(
+            tuple(bin_centers),
+            self.fit_beta[gamma_index],
+            bounds_error=False,
+            fill_value=None,  # Extrapolate
+        )
+
+        return alpha_interp, beta_interp
+
+    def plot_fit(self, bin_indices, gamma_index=0, ax=None):
+        """
+        Plot the fitted King PDF for a specific bin.
+
+        Parameters
+        ----------
+        bin_indices : tuple or dict
+            Indices of the bin to plot. Can be tuple of integers or dict
+            mapping bin names to indices.
+        gamma_index : int, optional
+            Index of spectral index. Default is 0.
+        ax : matplotlib.axes.Axes, optional
+            Axes to plot on. If None, creates new figure.
+
+        Returns
+        -------
+        matplotlib.axes.Axes
+            The axes object.
+
+        Notes
+        -----
+        Requires matplotlib (not imported by default). This method will raise
+        ImportError if matplotlib is not available.
+        """
+        import matplotlib.pyplot as plt
+
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(8, 6))
+
+        # Convert dict to tuple if needed
+        if isinstance(bin_indices, dict):
+            bin_indices = tuple(bin_indices[key] for key in self.bin_names)
+
+        param_idx = tuple([gamma_index] + list(bin_indices))
+
+        # Get histogram data
+        hist = self.histograms[param_idx]
+        uncertainty = self.uncertainties[param_idx]
+        bins = self.dpsi_bins[param_idx]
+
+        # Only plot non-zero bins
+        mask = hist > 0
+        bin_centers = (bins[:-1] + bins[1:])[mask] / 2
+
+        # Plot histogram
+        ax.errorbar(
+            np.degrees(bin_centers),
+            hist[mask],
+            yerr=uncertainty[mask],
+            fmt="o",
+            label="MC Events",
+            color="black",
+            markersize=4,
+        )
+
+        # Plot fitted King PDF
+        alpha = self.fit_alpha[param_idx]
+        beta = self.fit_beta[param_idx]
+        dpsi_fine = np.linspace(0, min(8 * alpha, np.pi), 1000)
+        pdf_fit = self.king_pdf.pdf(dpsi_fine, alpha, beta)
+        pdf_fit *= hist[mask].max() / pdf_fit.max()  # Normalize for visualization
+
+        ax.plot(np.degrees(dpsi_fine), pdf_fit, "-", linewidth=2, label="King Fit", color="blue")
+
+        # Add labels
+        ax.set_xlabel("Angular Error (degrees)")
+        ax.set_ylabel("Normalized Density")
+        ax.set_yscale("log")
+        ax.grid(alpha=0.3)
+        ax.legend()
+
+        # Add fit parameters to plot
+        title = f"γ={self.spectral_indices[gamma_index]:.2f}, "
+        title += f"α={np.degrees(alpha):.3f}°, β={beta:.2f}\n"
+        for i, key in enumerate(self.bin_names):
+            bin_idx = bin_indices[i]
+            bins = self.parametrization_bins[key]
+            title += f"{key}=[{bins[bin_idx]:.2e}, {bins[bin_idx + 1]:.2e}] "
+        ax.set_title(title, fontsize=10)
+
+        return ax

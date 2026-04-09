@@ -1,7 +1,8 @@
-import numpy as np
-from scipy.integrate import cumulative_trapezoid
+# Import main classes for convenience
+from .pdf import KingPDF, InterpolatedKingPDF, TemplateSmearedKingPDF
+from .fitting import KingPSFFitter
 
-class KingSpatialPDF():
+'''class KingSpatialPDF:
     def __init__(self):
         pass
 
@@ -13,22 +14,26 @@ class KingSpatialPDF():
 
     def _to_1d(self, *args):
         return (np.atleast_1d(_) for _ in args)
-    
+
     def _check_args(self, **kwargs):
         # Ensure all args are the same shape
         if len(kwargs.keys()) > 1:
             shape = list(kwargs.values())[0].shape
             for key, val in kwargs.items():
                 if len(val.shape) > 1:
-                    message = (f"The variable {key} has more than one dimension (shape = {val.shape})."
-                               " This is not supported at the moment. Try calling again with 1d values.")
+                    message = (
+                        f"The variable {key} has more than one dimension (shape = {val.shape})."
+                        " This is not supported at the moment. Try calling again with 1d values."
+                    )
                     raise NotImplementedError(message)
                 if val.shape != shape:
-                    message = (f"The variables {list(kwargs.keys())} have different shapes "
-                               f"{list(_.shape for _ in kwargs.values())}.")
+                    message = (
+                        f"The variables {list(kwargs.keys())} have different shapes "
+                        f"{list(_.shape for _ in kwargs.values())}."
+                    )
                     raise ValueError(message)
         return
-    
+
     def _unnormalized_pdf(self, x, alpha, beta):
         """
         Evaluate the unnormalized radial King function (without solid angle Jacobian).
@@ -62,13 +67,12 @@ class KingSpatialPDF():
         self._check_args(alpha=alpha, beta=beta)
 
         # Broadcast
-        alpha = alpha[:,None]
-        beta  = beta[:,None]
-        x     = x[None,:]
+        alpha = alpha[:, None]
+        beta = beta[:, None]
+        x = x[None, :]
 
         # Calculate the King function value and return
-        return (1 + (x / alpha)**2 / (2 * beta))**-beta
-
+        return (1 + (x / alpha) ** 2 / (2 * beta)) ** -beta
 
     def _unnormalized_cdf(self, x, alpha, beta):
         """
@@ -98,13 +102,13 @@ class KingSpatialPDF():
         # Check if x is a float or ndarray
         isscalar = np.isscalar(x)
         if isscalar:
-            x = np.logspace(np.log10(np.pi)-5, np.log10(x), 1000)
-        
+            x = np.logspace(np.log10(np.pi) - 5, np.log10(x), 1000)
+
         # Broadcast
         x, alpha, beta = self._to_1d(x, alpha, beta)
-        alpha = alpha[:,None]
-        beta  = beta[:,None]
-        x     = x[None,:]
+        alpha = alpha[:, None]
+        beta = beta[:, None]
+        x = x[None, :]
 
         # Use the unnormalized PDF (which doesn't include sin(x))
         unnormalized = np.array([self._unnormalized_pdf(x, a, b) for a, b in zip(alpha, beta)])
@@ -115,8 +119,8 @@ class KingSpatialPDF():
 
         # If we only want a scalar value out, grab only what we need
         if isscalar:
-            return cdf[...,-1]
-            
+            return cdf[..., -1]
+
     def _norm(self, alpha, beta):
         """
         Compute the normalization constant for the King PDF over the sphere.
@@ -140,3 +144,6 @@ class KingSpatialPDF():
         print("norm")
         cdf = self._unnormalized_cdf(np.pi, alpha, beta)
         return cdf
+'''
+
+__all__ = ["KingPDF", "InterpolatedKingPDF", "TemplateSmearedKingPDF", "KingPSFFitter"]
