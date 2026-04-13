@@ -18,7 +18,7 @@ class KingPSFFitter:
     signal_events : structured array
         Numpy structured array containing signal MC events. Must include:
         - 'ra', 'dec': reconstructed coordinates (radians)
-        - 'true_ra', 'true_dec': true coordinates (radians)
+        - 'trueRa', 'trueDec': true coordinates (radians)
         Additional fields can be used for parameterization binning.
     parametrization_bins : dict
         Dictionary mapping observable names to bin edges or number of bins.
@@ -86,8 +86,8 @@ class KingPSFFitter:
         self.dpsi = angular_distance(
             self.signal_events["ra"],
             self.signal_events["dec"],
-            self.signal_events["true_ra"],
-            self.signal_events["true_dec"],
+            self.signal_events["trueRa"],
+            self.signal_events["trueDec"],
         )
 
         # Bin events
@@ -110,7 +110,7 @@ class KingPSFFitter:
         ValueError
             If required fields are missing.
         """
-        required_fields = ["ra", "dec", "true_ra", "true_dec"]
+        required_fields = ["ra", "dec", "trueRa", "trueDec"]
         missing_required = [f for f in required_fields if f not in self.signal_events.dtype.names]
         if missing_required:
             raise ValueError(f"Signal events missing required fields: {missing_required}")
@@ -353,14 +353,15 @@ class KingPSFFitter:
         hist, _ = np.histogram(masked_dpsi, bins=dpsi_bins, weights=masked_weights)
         hist2, _ = np.histogram(masked_dpsi, bins=dpsi_bins, weights=masked_weights**2)
 
+        # Get initial guess from peak location. Do
+        # this before scaling to get the density.
+        alpha_guess = bin_centers[np.argmax(hist)]
+
         # Normalize by bin width to get density
-        delta = np.diff(dpsi_bins)
+        delta = 2*np.pi * np.diff(np.cos(dpsi_bins))
         with np.errstate(divide="ignore", invalid="ignore"):
             hist = hist / delta
             hist2 = hist2 / delta**2
-
-        # Get initial guess from peak location
-        alpha_guess = bin_centers[np.argmax(hist)]
 
         # Try multiple starting points to find best fit
         best_params = None
