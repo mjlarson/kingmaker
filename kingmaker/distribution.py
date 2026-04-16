@@ -3,8 +3,8 @@ from numba import vectorize, float32, float64
 
 _log10pi = np.log10(np.pi)
 
-@vectorize([float32(float32,float32,float32), float64(float64,float64,float64)], 
-           target='cpu')
+
+@vectorize([float32(float32, float32, float32), float64(float64, float64, float64)], target="cpu")
 def _unnormalized_pdf(x, alpha, beta):
     """
     Evaluate the unnormalized radial King function (without solid angle Jacobian).
@@ -27,10 +27,11 @@ def _unnormalized_pdf(x, alpha, beta):
         Unnormalized King function values with units of probability/sterradian.
     """
     # Calculate the King function value and return
-    return (1 + (x / alpha)**2 / (2 * beta))**-beta
+    return (1 + (x / alpha) ** 2 / (2 * beta)) ** -beta
 
-@vectorize#([float32(float32,float32,float32), float64(float64,float64,float64)],
-          # target='cpu')
+
+@vectorize  # ([float32(float32,float32,float32), float64(float64,float64,float64)],
+# target='cpu')
 def _unnormalized_cdf(x, alpha, beta):
     """
     Evaluate the CDF of the radial King function (without solid angle Jacobian).
@@ -54,14 +55,19 @@ def _unnormalized_cdf(x, alpha, beta):
         King function CDF value with units of probability.
     """
     # Define the grid points for the evaluation. Add some padding to the maximum.
-    points = np.append([0.0,], np.logspace(_log10pi-5, _log10pi, 1000))
-    
+    points = np.append(
+        [
+            0.0,
+        ],
+        np.logspace(_log10pi - 5, _log10pi, 1000),
+    )
+
     # Use the unnormalized PDF (given in 1/sr) and scale by the annulus area (~cos(dx))
     unnormalized = _unnormalized_pdf(points, alpha, beta)
-    solid_angle = 2*np.pi * np.abs(np.cos(points[1:]) - np.cos(points[:-1]))
-    integrand = np.append([0.0],
-                          np.cumsum(unnormalized[1:] * np.abs(solid_angle)))
+    solid_angle = 2 * np.pi * np.abs(np.cos(points[1:]) - np.cos(points[:-1]))
+    integrand = np.append([0.0], np.cumsum(unnormalized[1:] * np.abs(solid_angle)))
     return np.interp(x, points, integrand)
+
 
 def _norm(alpha, beta, maximum):
     """
@@ -77,7 +83,7 @@ def _norm(alpha, beta, maximum):
     beta : float or ndarray
         King distribution beta parameter (tail weight).
     maximum : float
-        The maximum angular value for the distribution. This would normally 
+        The maximum angular value for the distribution. This would normally
         just be pi, but can be smaller if the user is truncating the distribution.
 
     Returns
@@ -85,5 +91,4 @@ def _norm(alpha, beta, maximum):
     ndarray
         Normalization constants such that PDF integrates to 1 over the sphere.
     """
-    return 1.0/_unnormalized_cdf(maximum, alpha, beta)
-
+    return 1.0 / _unnormalized_cdf(maximum, alpha, beta)
