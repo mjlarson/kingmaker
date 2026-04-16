@@ -37,7 +37,7 @@ zip-safe=false
 line-length = 100
 include = ["*.py", "**/pyproject.toml"]
 # Skip def vs lambda rule, .
-ignore = ["E731"]
+lint.ignore = ["E731"]
 
 [tool.ruff.format]
 docstring-code-format = true

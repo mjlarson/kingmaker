@@ -358,7 +358,7 @@ class KingPSFFitter:
         alpha_guess = bin_centers[np.argmax(hist)]
 
         # Normalize by bin width to get density
-        delta = 2*np.pi * np.diff(np.cos(dpsi_bins))
+        delta = 2 * np.pi * np.diff(np.cos(dpsi_bins))
         with np.errstate(divide="ignore", invalid="ignore"):
             hist = hist / delta
             hist2 = hist2 / delta**2

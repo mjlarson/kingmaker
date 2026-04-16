@@ -188,7 +188,7 @@ class KingPDF:
         pdf = self.pdf(distance, alpha, beta)
 
         # Integrate over RA using a simple trapezoid rule integration.
-        # This should probably be checked for correct units. For example, 
+        # This should probably be checked for correct units. For example,
         # should this include a np.diff(sindec_bins) in the denominator?
         # I don't think it should, but someone should help check this.
         marginalized = np.zeros_like(sindec_bins)

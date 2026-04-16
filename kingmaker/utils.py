@@ -150,7 +150,7 @@ def map2nside(skymap):
 
 
 @njit
-def alm_index(l, m, lmax): #noqa: E741
+def alm_index(l, m, lmax):  # noqa: E741
     """
     Compute flat array index for spherical harmonic coefficient a_lm.
 
@@ -223,7 +223,7 @@ def _repack_alm(Ylm, packed_shape, lmax, mmax):
     # pack into alm order
     Ylm_packed = np.empty(packed_shape, dtype=np.complex128)
     idx = 0
-    for l in range(lmax + 1): # noqa: E741
+    for l in range(lmax + 1):  # noqa: E741
         idxmax = min(l, mmax) + 1
         Ylm_packed[idx : idx + idxmax] = Ylm[l, :idxmax]
         idx += idxmax
@@ -287,7 +287,7 @@ def almxfl(alm, bl, lmax, mmax):
     # Make a copy so that we don't modify the original
     result = alm.copy()
 
-    for l in range(lmax + 1): # noqa: E741
+    for l in range(lmax + 1):  # noqa: E741
         current = bl[l]
         if l < len(bl):
             current = bl[l]
