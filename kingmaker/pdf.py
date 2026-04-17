@@ -1,4 +1,6 @@
+from typing import Optional, Tuple, Union
 import numpy as np
+import numpy.typing as npt
 import healpy as hp
 from scipy.integrate import trapezoid
 from scipy.special import legendre_p_all
@@ -22,10 +24,14 @@ class KingPDF:
         Maximum angular separation in radians. Default is pi (full sphere).
     """
 
-    def __init__(self, *, angular_cutoff=np.pi):
+    def __init__(self, *, angular_cutoff: float = np.pi) -> None:
         self.angular_cutoff = angular_cutoff
 
-    def norm(self, alpha, beta):
+    def norm(
+        self,
+        alpha: Union[float, npt.NDArray[np.floating]],
+        beta: Union[float, npt.NDArray[np.floating]],
+    ) -> Union[float, npt.NDArray[np.floating]]:
         """
         Compute the normalization constant for given King parameters.
 
@@ -43,7 +49,12 @@ class KingPDF:
         """
         return _norm(alpha, beta, self.angular_cutoff)
 
-    def pdf(self, x, alpha, beta):
+    def pdf(
+        self,
+        x: Union[float, npt.NDArray[np.floating]],
+        alpha: Union[float, npt.NDArray[np.floating]],
+        beta: Union[float, npt.NDArray[np.floating]],
+    ) -> Union[float, npt.NDArray[np.floating]]:
         """
         Evaluate the normalized King PDF at given angular separation(s).
 
@@ -87,7 +98,12 @@ class KingPDF:
 
         return normalized_pdf
 
-    def cdf(self, x, alpha, beta):
+    def cdf(
+        self,
+        x: Union[float, npt.NDArray[np.floating]],
+        alpha: Union[float, npt.NDArray[np.floating]],
+        beta: Union[float, npt.NDArray[np.floating]],
+    ) -> Union[float, npt.NDArray[np.floating]]:
         """
         Evaluate the normalized King CDF at given angular separation(s).
 
@@ -131,7 +147,14 @@ class KingPDF:
 
         return normalized_cdf
 
-    def marginalize(self, dec, alpha, beta, threshold=1e-6, nbins=None):
+    def marginalize(
+        self,
+        dec: float,
+        alpha: float,
+        beta: float,
+        threshold: float = 1e-6,
+        nbins: Optional[int] = None,
+    ) -> Tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:
         """
         Marginalize the King PDF over right ascension to obtain declination profile.
 
@@ -218,16 +241,20 @@ class InterpolatedKingPDF(KingPDF):
     def __init__(
         self,
         *,
-        angular_cutoff=np.pi,
-        points_alpha=np.logspace(-5, _log10pi + 1e-2, 200),
-        points_beta=np.logspace(0, 1, 200),
-    ):
+        angular_cutoff: float = np.pi,
+        points_alpha: npt.NDArray[np.floating] = np.logspace(-5, _log10pi + 1e-2, 200),
+        points_beta: npt.NDArray[np.floating] = np.logspace(0, 1, 200),
+    ) -> None:
         super().__init__(angular_cutoff=angular_cutoff)
         self.points_alpha, self.points_beta = points_alpha, points_beta
         grid_alpha, grid_beta = np.meshgrid(points_alpha, points_beta)
         self.log10_grid_norms = np.log10(_norm(grid_alpha, grid_beta, self.angular_cutoff).T)
 
-    def norm(self, alpha, beta):
+    def norm(
+        self,
+        alpha: Union[float, npt.NDArray[np.floating]],
+        beta: Union[float, npt.NDArray[np.floating]],
+    ) -> Union[float, npt.NDArray[np.floating]]:
         return 10 ** _interp2d(
             alpha, beta, self.points_alpha, self.points_beta, self.log10_grid_norms
         )
@@ -262,16 +289,16 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
 
     def __init__(
         self,
-        skymap,
-        eval_decs,
-        eval_ras,
+        skymap: npt.NDArray[np.floating],
+        eval_decs: Union[float, npt.NDArray[np.floating]],
+        eval_ras: Union[float, npt.NDArray[np.floating]],
         *,
-        angular_cutoff=np.pi,
-        points_alpha=np.logspace(-5, _log10pi, 200),
-        points_beta=np.logspace(0, 1, 200),
-        lmax=None,
-        scheme="RING",
-    ):
+        angular_cutoff: float = np.pi,
+        points_alpha: npt.NDArray[np.floating] = np.logspace(-5, _log10pi, 200),
+        points_beta: npt.NDArray[np.floating] = np.logspace(0, 1, 200),
+        lmax: Optional[int] = None,
+        scheme: str = "RING",
+    ) -> None:
         super().__init__(
             angular_cutoff=angular_cutoff,
             points_alpha=np.logspace(-5, _log10pi, 200),
@@ -289,7 +316,11 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         self.skymap /= (self.skymap * hp.nside2resol(self.nside)).sum()
         self.skymap_alm = self.skymap_to_alm()
 
-    def set_coordinates(self, eval_decs, eval_ras):
+    def set_coordinates(
+        self,
+        eval_decs: Union[float, npt.NDArray[np.floating]],
+        eval_ras: Union[float, npt.NDArray[np.floating]],
+    ) -> None:
         """
         Set evaluation coordinates and pre-compute spherical harmonics.
 
@@ -309,7 +340,7 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         self._Y_lm = get_Ylm(self.lmax, self.mmax, self._eval_decs - np.pi / 2, self._eval_ras)
         return
 
-    def skymap_to_alm(self):
+    def skymap_to_alm(self) -> npt.NDArray[np.complexfloating]:
         """
         Convert the HEALPix skymap to spherical harmonic coefficients.
 
@@ -320,7 +351,9 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         """
         return hp.map2alm(self.skymap, lmax=self.lmax, mmax=self.mmax)
 
-    def get_king_b_l(self, alpha, beta, npoints=100, scale=np.pi / 4):
+    def get_king_b_l(
+        self, alpha: float, beta: float, npoints: int = 100, scale: float = np.pi / 4
+    ) -> npt.NDArray[np.floating]:
         """
         Compute spherical harmonic expansion coefficients b_l for the King PDF.
 
@@ -348,7 +381,7 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         pdf_vals = self.pdf(theta, alpha, beta)
         return 2 * np.pi * trapezoid(P_all * pdf_vals * np.sin(theta), dx=np.diff(theta))
 
-    def convolve_map(self, alpha, beta):
+    def convolve_map(self, alpha: float, beta: float) -> npt.NDArray[np.floating]:
         """
         Convolve the template skymap with a King PSF and return full HEALPix map.
 
@@ -368,7 +401,9 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         harmonic_convolution = hp.almxfl(self.skymap_alm.copy(), b_l, self.lmax, self.mmax)
         return hp.alm2map(harmonic_convolution, nside=self.nside, lmax=self.lmax, mmax=self.mmax)
 
-    def convolve_at_grid_point(self, alpha, beta, npoints=100, scale=np.pi / 4):
+    def convolve_at_grid_point(
+        self, alpha: float, beta: float, npoints: int = 100, scale: float = np.pi / 4
+    ) -> Union[float, npt.NDArray[np.floating]]:
         """
         Evaluate convolved PDF only at pre-set grid points (eval_decs, eval_ras).
 
@@ -398,5 +433,12 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         else:
             return np.real(harmonic_convolution * self._Y_lm).sum(axis=0)
 
-    def marginalize(self, dec, alpha, beta, threshold=1e-6):
+    def marginalize(
+        self,
+        dec: float,
+        alpha: float,
+        beta: float,
+        threshold: float = 1e-6,
+        nbins: Optional[int] = None,
+    ) -> Tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:
         raise NotImplementedError("Signal subtraction for templates is not implemented.")

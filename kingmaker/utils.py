@@ -1,13 +1,15 @@
+from typing import Tuple, Union
 import numpy as np
+import numpy.typing as npt
 from numba import guvectorize, njit
 from numba import float32, float64
 from scipy.special import sph_harm_y_all
 
-_log10pi = np.log10(np.pi)
+_log10pi: float = np.log10(np.pi)
 
 
 @njit
-def _interp1d(x, xlow, xhigh, ylow, yhigh):
+def _interp1d(x: float, xlow: float, xhigh: float, ylow: float, yhigh: float) -> float:
     """
     Perform 1D linear interpolation.
 
@@ -102,7 +104,7 @@ def _interp2d(x, y, xp, yp, z, result):
 
 
 @njit
-def adaptive_bins(alpha, npoints, scale=np.pi / 4):
+def adaptive_bins(alpha: float, npoints: int, scale: float = np.pi / 4) -> npt.NDArray[np.floating]:
     """
     Generate adaptive binning transitioning from logarithmic to linear spacing.
 
@@ -132,7 +134,7 @@ def adaptive_bins(alpha, npoints, scale=np.pi / 4):
     return linear * weight + logarithmic * (1 - weight)
 
 
-def map2nside(skymap):
+def map2nside(skymap: npt.NDArray[np.floating]) -> int:
     """
     Compute HEALPix nside parameter from skymap size.
 
@@ -150,7 +152,7 @@ def map2nside(skymap):
 
 
 @njit
-def alm_index(l, m, lmax):  # noqa: E741
+def alm_index(l: int, m: int, lmax: int) -> int:  # noqa: E741
     """
     Compute flat array index for spherical harmonic coefficient a_lm.
 
@@ -171,7 +173,9 @@ def alm_index(l, m, lmax):  # noqa: E741
     return int(m * (2 * lmax + 1 - m) / 2 + l)
 
 
-def _reshape_alm(Ylm_all, lmax, mmax):
+def _reshape_alm(
+    Ylm_all: npt.NDArray[np.complexfloating], lmax: int, mmax: int
+) -> Tuple[npt.NDArray[np.complexfloating], Union[int, Tuple[int, int]]]:
     """
     Reshape spherical harmonic array and compute packed dimensions.
 
@@ -198,7 +202,12 @@ def _reshape_alm(Ylm_all, lmax, mmax):
         return Ylm_all, (nalm, Ylm_all.shape[-1])
 
 
-def _repack_alm(Ylm, packed_shape, lmax, mmax):
+def _repack_alm(
+    Ylm: npt.NDArray[np.complexfloating],
+    packed_shape: Union[int, Tuple[int, int]],
+    lmax: int,
+    mmax: int,
+) -> npt.NDArray[np.complexfloating]:
     """
     Repack Y_lm values into a_lm coefficient ordering.
 
@@ -230,7 +239,12 @@ def _repack_alm(Ylm, packed_shape, lmax, mmax):
     return Ylm_packed
 
 
-def get_Ylm(lmax, mmax, theta, phi):
+def get_Ylm(
+    lmax: int,
+    mmax: int,
+    theta: Union[float, npt.NDArray[np.floating]],
+    phi: Union[float, npt.NDArray[np.floating]],
+) -> npt.NDArray[np.complexfloating]:
     """
     Compute spherical harmonics Y_lm at given angles.
 
@@ -259,7 +273,9 @@ def get_Ylm(lmax, mmax, theta, phi):
 
 
 @njit
-def almxfl(alm, bl, lmax, mmax):
+def almxfl(
+    alm: npt.NDArray[np.complexfloating], bl: npt.NDArray[np.floating], lmax: int, mmax: int
+) -> npt.NDArray[np.complexfloating]:
     """
     Multiply spherical harmonic coefficients a_lm by mode-coupling factors b_l.
 
@@ -302,7 +318,12 @@ def almxfl(alm, bl, lmax, mmax):
 
 
 @njit
-def angular_distance(src_ra, src_dec, ra, dec):
+def angular_distance(
+    src_ra: Union[float, npt.NDArray[np.floating]],
+    src_dec: Union[float, npt.NDArray[np.floating]],
+    ra: Union[float, npt.NDArray[np.floating]],
+    dec: Union[float, npt.NDArray[np.floating]],
+) -> Union[float, npt.NDArray[np.floating]]:
     """
     Calculate angular distance on the sphere using the haversine formula.
 
@@ -330,7 +351,9 @@ def angular_distance(src_ra, src_dec, ra, dec):
 
 
 @njit
-def meshgrid2d(a, b):
+def meshgrid2d(
+    a: npt.NDArray[np.floating], b: npt.NDArray[np.floating]
+) -> Tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:
     """
     Create 2D meshgrid from 1D coordinate arrays (numba-compatible).
 
