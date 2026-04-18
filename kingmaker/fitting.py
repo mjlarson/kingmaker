@@ -33,7 +33,7 @@ class KingPSFFitter:
     minimum_counts : int, optional
         Minimum number of events required in a bin for fitting. Default is 100.
     weight_field : str, optional
-        Field name for event weights. If None, equal weights are used.
+        Field name for oneweight. If None, equal weights are used.
     spectral_indices : array-like, optional
         Spectral indices (gamma) for reweighting. Default is [2.0].
     angular_cutoff : float, optional
@@ -61,7 +61,7 @@ class KingPSFFitter:
         parametrization_bins: Dict[str, Union[int, List, Tuple, npt.NDArray]],
         dpsi_nbins: int = 101,
         minimum_counts: int = 100,
-        weight_field: Optional[str] = None,
+        weight_field: Optional[str] = "ow",
         spectral_indices: Optional[Union[List[float], npt.NDArray[np.floating]]] = None,
         angular_cutoff: float = np.pi,
     ) -> None:
@@ -267,22 +267,18 @@ class KingPSFFitter:
             print(f"  Spectral indices: {self.spectral_indices}")
             print(f"  Binning dimensions: {self.bin_names}")
 
-        # Get base weights
-        if self.weight_field is not None:
-            base_weights = self.signal_events[self.weight_field]
-        else:
-            base_weights = np.ones(len(self.signal_events))
-
         # Iterate over spectral indices
         for g_idx, gamma in enumerate(self.spectral_indices):
             if verbose:
                 print(f"\n  Spectral index γ = {gamma:.2f}")
 
-            # Calculate spectral weights if energy field exists
-            if "true_energy" in self.signal_events.dtype.names:
-                weights = base_weights * self.signal_events["true_energy"] ** (-gamma)
+            # Calculate event weights
+            if self.weight_field is not None:
+                weights = self.signal_events[self.weight_field] * self.signal_events[
+                    "true_energy"
+                ] ** (-gamma)
             else:
-                weights = base_weights.copy()
+                base_weights = np.ones(len(self.signal_events))
 
             # Iterate over all bin combinations
             n_fitted = 0
@@ -325,6 +321,7 @@ class KingPSFFitter:
             "dpsi_bins": self.dpsi_bins,
             "fit_quality": self.fit_quality,
             "event_counts": self.event_counts,
+            "parametrization_bins": self.parametrization_bins,
         }
 
     def _fit_single_bin(
@@ -381,12 +378,14 @@ class KingPSFFitter:
 
         # Try multiple starting points to find best fit
         best_params = None
-        best_chi2 = np.inf
 
         test_alphas = alpha_guess * np.array([0.5, 0.75, 1.0, 1.25, 1.5])
         test_betas = np.array([1.5, 2.0, 2.5, 3.0, 4.0])
 
         for alpha_0 in test_alphas:
+            # Keep track of the best value for each alpha so we can
+            # quit early if we start climbing out of the minimum.
+            best_chi2 = np.inf
             for beta_0 in test_betas:
                 try:
                     params, chi2 = self._fit_histogram(

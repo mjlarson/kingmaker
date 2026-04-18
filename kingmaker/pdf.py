@@ -3,11 +3,11 @@ import numpy as np
 import numpy.typing as npt
 import healpy as hp
 from scipy.integrate import trapezoid
-from scipy.special import legendre_p_all
+from scipy.special import legendre_p_all, sph_harm_y_all
 
 from .distribution import _log10pi
 from .distribution import _norm, _unnormalized_pdf, _unnormalized_cdf
-from .utils import _interp2d, adaptive_bins, angular_distance, get_Ylm, meshgrid2d
+from .utils import _interp2d, angular_distance, meshgrid2d
 
 
 class KingPDF:
@@ -290,9 +290,9 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
     def __init__(
         self,
         skymap: npt.NDArray[np.floating],
-        eval_decs: Union[float, npt.NDArray[np.floating]],
-        eval_ras: Union[float, npt.NDArray[np.floating]],
         *,
+        eval_decs: Union[float, npt.NDArray[np.floating], None] = None,
+        eval_ras: Union[float, npt.NDArray[np.floating], None] = None,
         angular_cutoff: float = np.pi,
         points_alpha: npt.NDArray[np.floating] = np.logspace(-5, _log10pi, 200),
         points_beta: npt.NDArray[np.floating] = np.logspace(0, 1, 200),
@@ -301,20 +301,41 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
     ) -> None:
         super().__init__(
             angular_cutoff=angular_cutoff,
-            points_alpha=np.logspace(-5, _log10pi, 200),
-            points_beta=np.logspace(0, 1, 200),
+            points_alpha=points_alpha,
+            points_beta=points_beta,
         )
         self.nside = hp.npix2nside(len(skymap))
         self.lmax = (3 * self.nside - 1) if lmax is None else lmax
         self.mmax = self.lmax
 
-        # Set up the evaluation coordinates
-        self.set_coordinates(eval_decs, eval_ras)
-
         # While we're here, normalize the skymap so it integrates to 1.
-        self.skymap = skymap
-        self.skymap /= (self.skymap * hp.nside2resol(self.nside)).sum()
+        self.skymap = skymap.copy()
+        self.skymap /= self.skymap.sum()
+        self.skymap /= hp.nside2pixarea(self.nside)
         self.skymap_alm = self.skymap_to_alm()
+
+        # Precompute the indices for the spherical harmonic coefficients
+        # we'll need for convolution.
+        self.ls = np.concatenate([np.full(min(l, self.mmax) + 1, l) 
+                             for l in range(self.lmax + 1)]) # noqa: E741
+        self.ms = np.concatenate([np.arange(min(l, self.mmax) + 1) 
+                             for l in range(self.lmax + 1)])  # noqa: E741
+        self._alm_indices = hp.Alm.getidx(self.lmax, self.ls, self.ms)
+        self._m_vals = self.ms 
+
+        # Set up the evaluation coordinates
+        if eval_decs is not None and eval_ras is not None:
+            self.set_coordinates(eval_decs, eval_ras)
+
+        # Choose a reasonable enough grid for the b_l calculation
+        # and pre-generate the Legendre polynomials we'll need.
+        # The actual values here are little awkward and arbitrary,
+        # but they should be fine for most people. Note that these
+        # are in radians, so a value of 1e-4 corresponds to about
+        # 0.0057 degrees: this is much smaller than IceCube's 
+        # typical angular resolution.
+        self.theta_grid = np.concatenate([[0.0], np.logspace(-4, np.log10(self.angular_cutoff), 1000)])
+        self.P_all = legendre_p_all(self.lmax, np.cos(self.theta_grid))[0]
 
     def set_coordinates(
         self,
@@ -331,13 +352,24 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         eval_ras : float or ndarray
             Right ascension(s) in radians.
         """
-        self._eval_decs = np.atleast_1d(eval_decs)
-        self._eval_ras = np.atleast_1d(eval_ras)
-        assert self._eval_decs.shape == self._eval_ras.shape
+        self.eval_decs = np.atleast_1d(eval_decs)
+        self.eval_ras = np.atleast_1d(eval_ras)
+        assert self.eval_decs.shape == self.eval_ras.shape
 
-        # Evaluate the Y_lm harmonic functions now so we can use them later without cost.
-        # The theta, phi here are co-latitude and azimuth/RA, both in radians.
-        self._Y_lm = get_Ylm(self.lmax, self.mmax, self._eval_decs - np.pi / 2, self._eval_ras)
+        # Compute all Y_lm at once: shape (lmax+1, 2*mmax+1, npts)
+        # m axis ordering: 0, +1, +2, ..., +mmax, -mmax, ..., -1
+        raw = sph_harm_y_all(self.lmax, self.mmax, np.pi/2 - self.eval_decs, self.eval_ras)
+        
+        # Extract all needed Y_lm at once: shape (nalm, npts)
+        Y_lm_all = raw[self.ls, self.ms, :]  # advanced indexing, no loop
+        a_lm_all = self.skymap_alm[self._alm_indices]  # shape (nalm,)
+        contribs = np.real(a_lm_all[:, None] * Y_lm_all)  # (nalm, npts)
+        factors = np.where(self._m_vals == 0, 1.0, 2.0)   # (nalm,)
+
+        # Accumulate per l
+        npts = len(self.eval_decs)
+        self._c_l = np.zeros((self.lmax + 1, npts), dtype=np.float64)
+        np.add.at(self._c_l, self.ls, factors[:, None] * contribs)
         return
 
     def skymap_to_alm(self) -> npt.NDArray[np.complexfloating]:
@@ -352,8 +384,7 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         return hp.map2alm(self.skymap, lmax=self.lmax, mmax=self.mmax)
 
     def get_king_b_l(
-        self, alpha: float, beta: float, npoints: int = 100, scale: float = np.pi / 4
-    ) -> npt.NDArray[np.floating]:
+        self, alpha: float, beta: float) -> npt.NDArray[np.floating]:
         """
         Compute spherical harmonic expansion coefficients b_l for the King PDF.
 
@@ -366,20 +397,39 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
             King distribution alpha parameter (scale) in radians.
         beta : float
             King distribution beta parameter (tail weight).
-        npoints : int, optional
-            Number of integration points. Default is 100.
-        scale : float, optional
-            Scale factor for adaptive binning. Default is pi/4.
 
         Returns
         -------
         ndarray
             Spherical harmonic coefficients b_l for degrees 0 to lmax.
         """
-        theta = adaptive_bins(alpha, npoints, scale=scale)
-        P_all = legendre_p_all(self.lmax, np.cos(theta))[0]
-        pdf_vals = self.pdf(theta, alpha, beta)
-        return 2 * np.pi * trapezoid(P_all * pdf_vals * np.sin(theta), dx=np.diff(theta))
+        pdf_vals = self.pdf(self.theta_grid, alpha, beta)
+        return 2 * np.pi * trapezoid(self.P_all * pdf_vals * np.sin(self.theta_grid), dx=np.diff(self.theta_grid))
+
+    #--------------------------------------------------------
+    # Vectorized over the whole grid at once
+    #def _precompute_bl_grid(self):
+    #    # pdf evaluates fine over arrays
+    #    # self._theta_grid: (npoints,)
+    #    # pdf_vals: (n_alpha, n_beta, npoints) via broadcasting
+    #    alpha_grid, beta_grid = np.meshgrid(self.points_alpha, self.points_beta, indexing="ij")
+    #    # shape: (n_alpha, n_beta, npoints)
+    #    pdf_vals = self.pdf(
+    #        self._theta_grid[None, None, :], alpha_grid[:, :, None], beta_grid[:, :, None]
+    #    )
+    #    # _P_all: (lmax+1, npoints) -> integrate against each pdf
+    #    # trapezoid over last axis
+    #    integrand = pdf_vals * self._sin_theta[None, None, :]  # (n_alpha, n_beta, npoints)
+    #    # (lmax+1, npoints) @ (npoints, n_alpha*n_beta) -> (lmax+1, n_alpha*n_beta)
+    #    bl_grid = (
+    #        2
+    #        * np.pi
+    #        * np.trapz(
+    #            self._P_all[:, None, None, :] * integrand[None, :, :, :], dx=self._dtheta, axis=-1
+    #        )
+    #    )  # (lmax+1, n_alpha, n_beta)
+    #    self._bl_grid = bl_grid.transpose(1, 2, 0)  # (n_alpha, n_beta, lmax+1)
+    # --------------------------------------------------------
 
     def convolve_map(self, alpha: float, beta: float) -> npt.NDArray[np.floating]:
         """
@@ -398,11 +448,11 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
             Convolved HEALPix skymap at the same resolution as input.
         """
         b_l = self.get_king_b_l(alpha, beta)
-        harmonic_convolution = hp.almxfl(self.skymap_alm.copy(), b_l, self.lmax, self.mmax)
+        harmonic_convolution = hp.almxfl(alm=self.skymap_alm, fl=b_l, mmax=self.mmax, inplace=False)
         return hp.alm2map(harmonic_convolution, nside=self.nside, lmax=self.lmax, mmax=self.mmax)
 
     def convolve_at_grid_point(
-        self, alpha: float, beta: float, npoints: int = 100, scale: float = np.pi / 4
+        self, alpha: float, beta: float
     ) -> Union[float, npt.NDArray[np.floating]]:
         """
         Evaluate convolved PDF only at pre-set grid points (eval_decs, eval_ras).
@@ -416,22 +466,14 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
             King distribution alpha parameter (scale) in radians.
         beta : float
             King distribution beta parameter (tail weight).
-        npoints : int, optional
-            Number of integration points for b_l calculation. Default is 100.
-        scale : float, optional
-            Scale factor for adaptive binning. Default is pi/4.
 
         Returns
         -------
         float or ndarray
             Convolved PDF value(s) at evaluation coordinates.
         """
-        b_l = self.get_king_b_l(alpha, beta, npoints=npoints, scale=scale)
-        harmonic_convolution = hp.almxfl(self.skymap_alm.copy(), b_l, self.lmax, self.mmax)
-        if len(self._Y_lm.shape) > 1:
-            return np.real(harmonic_convolution[:, None] * self._Y_lm).sum(axis=0)
-        else:
-            return np.real(harmonic_convolution * self._Y_lm).sum(axis=0)
+        b_l = self.get_king_b_l(alpha, beta)
+        return b_l @ self._c_l
 
     def marginalize(
         self,

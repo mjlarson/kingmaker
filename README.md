@@ -1,5 +1,9 @@
 # kingmaker
 
+![Tests](https://github.com/USERNAME/kingmaker/actions/workflows/tests.yml/badge.svg)
+[![codecov](https://codecov.io/gh/USERNAME/kingmaker/branch/main/graph/badge.svg)](https://codecov.io/gh/USERNAME/kingmaker)
+![Python](https://img.shields.io/badge/python-3.12%2B-blue)
+
 A Python library for working with King/Moffat distributions for modeling point spread functions (PSFs) in high-energy astrophysics.
 
 ## Overview
