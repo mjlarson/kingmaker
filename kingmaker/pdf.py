@@ -1,4 +1,5 @@
 from typing import Optional, Tuple, Union
+import os
 import numpy as np
 import numpy.typing as npt
 import healpy as hp
@@ -233,16 +234,16 @@ class InterpolatedKingPDF(KingPDF):
     angular_cutoff : float, optional
         Maximum angular separation in radians. Default is pi.
     points_alpha : ndarray, optional
-        Grid of alpha values for normalization interpolation.
+        Grid of alpha values for normalization interpolation. Unit: radians
     points_beta : ndarray, optional
-        Grid of beta values for normalization interpolation.
+        Grid of beta values for normalization interpolation. 
     """
 
     def __init__(
         self,
         *,
         angular_cutoff: float = np.pi,
-        points_alpha: npt.NDArray[np.floating] = np.logspace(-5, _log10pi + 1e-2, 200),
+        points_alpha: npt.NDArray[np.floating] = np.logspace(-4, _log10pi + 1e-2, 200),
         points_beta: npt.NDArray[np.floating] = np.logspace(0, 1, 200),
     ) -> None:
         super().__init__(angular_cutoff=angular_cutoff)
@@ -255,6 +256,10 @@ class InterpolatedKingPDF(KingPDF):
         alpha: Union[float, npt.NDArray[np.floating]],
         beta: Union[float, npt.NDArray[np.floating]],
     ) -> Union[float, npt.NDArray[np.floating]]:
+        if np.any(alpha < self.points_alpha[0]) or np.any(alpha > self.points_alpha[-1]):
+            raise ValueError(f"Alpha value {alpha} must be within the interpolation grid: alpha in [{self.points_alpha[0]}, {self.points_alpha[-1]}]")
+        if np.any(beta < self.points_beta[0]) or np.any(beta > self.points_beta[-1]):
+            raise ValueError(f"Beta value {beta} must be within the interpolation grid: beta in [{self.points_beta[0]}, {self.points_beta[-1]}]")
         return 10 ** _interp2d(
             alpha, beta, self.points_alpha, self.points_beta, self.log10_grid_norms
         )
@@ -283,9 +288,10 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         Grid of beta values for normalization interpolation.
     lmax : int, optional
         Maximum spherical harmonic degree. Default is 3*nside-1.
-    scheme : str, optional
-        HEALPix ordering scheme ('RING' or 'NESTED'). Default is 'RING'.
     """
+    skymap : npt.NDArray[np.floating]
+    eval_decs : npt.NDArray[np.floating] = np.array([], dtype=np.float32)
+    eval_ras: npt.NDArray[np.floating] = np.array([], dtype=np.float32)
 
     def __init__(
         self,
@@ -294,10 +300,9 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         eval_decs: Union[float, npt.NDArray[np.floating], None] = None,
         eval_ras: Union[float, npt.NDArray[np.floating], None] = None,
         angular_cutoff: float = np.pi,
-        points_alpha: npt.NDArray[np.floating] = np.logspace(-5, _log10pi, 200),
+        points_alpha: npt.NDArray[np.floating] = np.logspace(-4, _log10pi, 100),
         points_beta: npt.NDArray[np.floating] = np.logspace(0, 1, 200),
         lmax: Optional[int] = None,
-        scheme: str = "RING",
     ) -> None:
         super().__init__(
             angular_cutoff=angular_cutoff,
@@ -309,10 +314,10 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         self.mmax = self.lmax
 
         # While we're here, normalize the skymap so it integrates to 1.
-        self.skymap = skymap.copy()
-        self.skymap /= self.skymap.sum()
-        self.skymap /= hp.nside2pixarea(self.nside)
-        self.skymap_alm = self.skymap_to_alm()
+        # Then calculate the alm coefficients needed for convolution.
+        self.skymap = skymap
+        normalized_skymap = skymap / skymap.sum() / hp.nside2pixarea(self.nside)
+        self.skymap_alm = hp.map2alm(normalized_skymap, lmax=self.lmax, mmax=self.mmax)
 
         # Precompute the indices for the spherical harmonic coefficients
         # we'll need for convolution.
@@ -333,9 +338,20 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         # but they should be fine for most people. Note that these
         # are in radians, so a value of 1e-4 corresponds to about
         # 0.0057 degrees: this is much smaller than IceCube's 
-        # typical angular resolution.
-        self.theta_grid = np.concatenate([[0.0], np.logspace(-4, np.log10(self.angular_cutoff), 1000)])
-        self.P_all = legendre_p_all(self.lmax, np.cos(self.theta_grid))[0]
+        # typical angular resolution. Since these are expensive,
+        # we can cache them to disk once and just load them for
+        # all future coefficients.
+        if not os.path.exists("precomputed_legendre.npz"):
+            #print("Generating and storing Legendre polynomials for convolution...")
+            self.theta_grid = np.concatenate([[0.0], np.logspace(-4, np.log10(self.angular_cutoff), 1000)])
+            P_all = legendre_p_all(1024, np.cos(self.theta_grid))[0]
+            np.savez("precomputed_legendre.npz", theta_grid=self.theta_grid, P_all=P_all)
+            self.P_all = P_all[:self.lmax + 1]
+        else:
+            #print("Loading precomputed Legendre polynomials for convolution...")
+            precomputed = np.load("precomputed_legendre.npz")
+            self.theta_grid = precomputed["theta_grid"]
+            self.P_all = precomputed["P_all"][:self.lmax + 1]
 
     def set_coordinates(
         self,
@@ -352,6 +368,21 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         eval_ras : float or ndarray
             Right ascension(s) in radians.
         """
+        # If there's a different number of declination and RA points, 
+        # there's something wrong. 
+        if np.atleast_1d(eval_decs).shape != np.atleast_1d(eval_ras).shape:
+            raise RuntimeError(
+                "TemplateSmearedKingPDF::set_coordinates received different numbers"
+                f" of declination values ({np.atleast_1d(eval_decs).shape}) and"
+                f" right ascension values ({np.atleast_1d(eval_ras).shape})."
+                " These need to match since each is assumed to be one source."
+            )
+
+        # If the coordinates match what we already have, do nothing.
+        if (np.equal(self.eval_decs, np.atleast_1d(eval_decs))
+            and np.equal(self.eval_ras, np.atleast_1d(eval_ras))):
+            return
+
         self.eval_decs = np.atleast_1d(eval_decs)
         self.eval_ras = np.atleast_1d(eval_ras)
         assert self.eval_decs.shape == self.eval_ras.shape
@@ -404,7 +435,7 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
             Spherical harmonic coefficients b_l for degrees 0 to lmax.
         """
         pdf_vals = self.pdf(self.theta_grid, alpha, beta)
-        return 2 * np.pi * trapezoid(self.P_all * pdf_vals * np.sin(self.theta_grid), dx=np.diff(self.theta_grid))
+        return 2 * np.pi * trapezoid(self.P_all * pdf_vals * np.sin(self.theta_grid), x=self.theta_grid)
 
     #--------------------------------------------------------
     # Vectorized over the whole grid at once
