@@ -5,7 +5,7 @@ from os.path import exists
 import logging
 import numpy as np
 import healpy as hp
-from scipy.interpolate import interpn
+from scipy.interpolate import interp1d, interpn
 
 from .pdf import InterpolatedKingPDF, TemplateSmearedKingPDF
 from .fitting import KingPSFFitter
@@ -40,11 +40,11 @@ class KingSpatialLikelihood:
 
     # Have some place to cache the per-event information so we don't need to
     # recalculate it every time we evaluate the PDF.
-    event_alpha: Dict[float, npt.NDArray[np.floating]] = {}
-    event_beta: Dict[float, npt.NDArray[np.floating]] = {}
-    event_distances: Union[npt.NDArray[np.floating], List[float]] = []
-    map_index: Union[npt.NDArray[np.integer], List[int]] = []
-    event_pvalue: Dict[float, Union[List, npt.NDArray[np.floating]]] = {}
+    event_alpha: Dict[float, npt.NDArray[np.floating]]
+    event_beta: Dict[float, npt.NDArray[np.floating]]
+    event_distances: Union[npt.NDArray[np.floating], List[float]]
+    map_index: Union[npt.NDArray[np.integer], List[int]]
+    event_pvalue: Dict[float, Union[List, npt.NDArray[np.floating]]]
 
     # General warning flags
     multiple_source_warning_logged: bool = False
@@ -74,6 +74,11 @@ class KingSpatialLikelihood:
         # passed in a number of bins instead of actual bin edges. 
         self.spectral_indices = np.atleast_1d(spectral_indices)
         self.skymap = skymap
+
+        # Set some default values for the event-level parameters.
+        self.event_alpha, self.event_beta = {}, {}
+        self.event_distances, self.map_index = [], []
+        self.event_pvalue = {}
 
         # Obtain the King distribution parameters for all bins. If we're caching parameters
         # and a cache file exists, load from the cache instead of fitting. Otherwise,
@@ -106,10 +111,10 @@ class KingSpatialLikelihood:
         if self.skymap is not None:
             self.nside = hp.npix2nside(len(self.skymap))
             self.template_pdf = TemplateSmearedKingPDF(
-                skymap=self.skymap, angular_cutoff=self.angular_cutoff
+                skymap=self.skymap, angular_cutoff=angular_cutoff
             )
         else:
-            self.king_pdf = InterpolatedKingPDF(angular_cutoff=self.angular_cutoff)
+            self.king_pdf = InterpolatedKingPDF(angular_cutoff=angular_cutoff)
 
         return
 
@@ -120,9 +125,13 @@ class KingSpatialLikelihood:
         the fitted parameters based on the event parameters and the provided binning. Then calculate the pvalues
         for each spectral index for each event and store them so we can interpolate them at runtime.
         """
+        self.events = events
+        self.source_ras = source_ras
+        self.source_decs = source_decs
+
         # The source_ras and source_decs must be specified unless we're using the
         # template PDF. Ensure that this is the case and raise an error if not.
-        if not self.template_pdf and (source_ras is None or source_decs is None):
+        if self.skymap is None and (source_ras is None or source_decs is None):
             raise ValueError("This instance of the KingSpatialLikelihood was not configured with"
                              " a skymap, suggesting that this should be a point source analysis."
                              " However, no source locations were provided. Please ensure that"
@@ -134,11 +143,12 @@ class KingSpatialLikelihood:
                              "that these arrays have the same length when passing into set_events.")
 
         # Begin by finding the per-event alpha and beta values via interpolation.
-        # Extract the bin edges and keys for each event.
+        # Extract the bin centers and keys for each event. The stored bins are
+        # edges, but interpn requires coordinates matching the values shape.
         keys, bins = [], []
-        for item in self.parametrization_bins.items():
-            keys.append(item[0])
-            bins.append(item[1])
+        for key, edges in self.parametrization_bins.items():
+            keys.append(key)
+            bins.append((edges[:-1] + edges[1:]) / 2)
 
         # Get the event parameter values for each parameter
         event_param_values = np.array([events[key] for key in keys]).T
@@ -161,7 +171,7 @@ class KingSpatialLikelihood:
 
         # If we're using a skymap, then we can calculate the bin
         # index for each event now.
-        if self.template_pdf:
+        if self.skymap is not None:
             self.map_index = hp.ang2pix(self.nside, events["dec"], events["ra"], lonlat=True)
             # TODO: How can I calculate the pvalues for the PDF-convolved skymap without calculating
             # each event individually? This needs to be done efficiently, but I'm not yet sure how
@@ -181,23 +191,34 @@ class KingSpatialLikelihood:
                 logging.warning("Multiple source positions provided. This has not been tested and"
                                 " may not work as expected. Please check the results carefully!")
                 self.multiple_source_warning_logged = True
-            self.event_pvalue[gamma] = self.king_pdf.pdf(self.event_distances,
-                                                         self.event_alpha[gamma],
-                                                         self.event_beta[gamma])
+            for gamma in self.spectral_indices:
+                self.event_pvalue[gamma] = self.king_pdf.pdf(self.event_distances,
+                                                            self.event_alpha[gamma],
+                                                            self.event_beta[gamma])
         return
 
     def evaluate_pdf(self, events: npt.NDArray[Any], gamma: float = 2) -> npt.NDArray[np.floating]:
         # If we haven't already calculated the per-event alpha and beta parameters, do so now.
         if len(self.event_alpha) == 0 or len(self.event_beta) == 0:
-            self.set_events(events)
+            raise RuntimeError(
+                "Events have not been configured yet. Call set_events with the appropriate events"
+                " for this trial and source locations before evaluating the PDF."
+            )
 
+        if not np.array_equal(self.events, events):
+             raise RuntimeError(
+                "The events provided to evaluate_pdf do not match the events that were used to calculate the per-event parameters."
+                " Please ensure that you call set_events with the same events that you later pass into evaluate_pdf."
+            )
+        
         if gamma in self.spectral_indices:
             # If the requested gamma is one of the fitted spectral indices, we can directly use those parameters.
             return self.event_pvalue[gamma]
         else:
             # Otherwise we have to interpolate the gamma values.
-            return np.interp(
-                gamma, self.spectral_indices, [self.event_pvalue[g] for g in self.spectral_indices]
+            pvalues = np.array([self.event_pvalue[g] for g in self.spectral_indices])
+            idx = np.clip(np.searchsorted(self.spectral_indices, gamma) - 1, 0, len(self.spectral_indices) - 2)
+            t = (gamma - self.spectral_indices[idx]) / (
+                self.spectral_indices[idx + 1] - self.spectral_indices[idx]
             )
-
-
+            return (1 - t) * pvalues[idx] + t * pvalues[idx + 1]
