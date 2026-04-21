@@ -221,6 +221,43 @@ class KingPDF:
         )
         return sindec_bins, marginalized
 
+    def sample(
+        self,
+        n: int,
+        alpha: float,
+        beta: float,
+        rng: Optional[np.random.Generator] = None,
+        n_grid: int = 10000,
+    ) -> npt.NDArray[np.floating]:
+        """
+        Sample angular separations from the King distribution via inverse CDF.
+
+        Parameters
+        ----------
+        n : int
+            Number of samples to draw.
+        alpha : float
+            King distribution alpha parameter (scale) in radians.
+        beta : float
+            King distribution beta parameter (tail weight).
+        rng : np.random.Generator, optional
+            Random number generator. If None, uses np.random.default_rng().
+        n_grid : int, optional
+            Number of points in the CDF lookup grid. Higher values give more
+            accurate sampling at the cost of memory and setup time. Default
+            is 10000, which gives ~arcminute accuracy.
+
+        Returns
+        -------
+        ndarray
+            Angular separations in radians, shape (n,).
+        """
+        if rng is None:
+            rng = np.random.default_rng()
+        psi_grid = np.linspace(1e-6, self.angular_cutoff, n_grid)
+        cdf_grid = self.cdf(psi_grid, alpha, beta)
+        return np.interp(rng.uniform(0, cdf_grid[-1], n), cdf_grid, psi_grid)
+
 
 class InterpolatedKingPDF(KingPDF):
     """
@@ -248,7 +285,8 @@ class InterpolatedKingPDF(KingPDF):
     ) -> None:
         super().__init__(angular_cutoff=angular_cutoff)
         self.points_alpha, self.points_beta = points_alpha, points_beta
-        grid_alpha, grid_beta = np.meshgrid(points_alpha, points_beta)
+        self.log10_points_alpha, self.log10_points_beta = np.log10(points_alpha), np.log10(points_beta)
+        grid_alpha, grid_beta = np.meshgrid(self.points_alpha, self.points_beta)
         self.log10_grid_norms = np.log10(_norm(grid_alpha, grid_beta, self.angular_cutoff).T)
 
     def norm(
@@ -261,7 +299,7 @@ class InterpolatedKingPDF(KingPDF):
         if np.any(beta < self.points_beta[0]) or np.any(beta > self.points_beta[-1]):
             raise ValueError(f"Beta value {beta} must be within the interpolation grid: beta in [{self.points_beta[0]}, {self.points_beta[-1]}]")
         return 10 ** _interp2d(
-            alpha, beta, self.points_alpha, self.points_beta, self.log10_grid_norms
+            np.log10(alpha), np.log10(beta), self.log10_points_alpha, self.log10_points_beta, self.log10_grid_norms
         )
 
 
@@ -297,10 +335,10 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         self,
         skymap: npt.NDArray[np.floating],
         *,
-        eval_decs: Union[float, npt.NDArray[np.floating], None] = None,
-        eval_ras: Union[float, npt.NDArray[np.floating], None] = None,
+        eval_decs: Optional[Union[float, npt.NDArray[np.floating]]] = None,
+        eval_ras: Optional[Union[float, npt.NDArray[np.floating]]] = None,
         angular_cutoff: float = np.pi,
-        points_alpha: npt.NDArray[np.floating] = np.logspace(-4, _log10pi, 100),
+        points_alpha: npt.NDArray[np.floating] = np.logspace(-4, _log10pi + 1e-2, 200),
         points_beta: npt.NDArray[np.floating] = np.logspace(0, 1, 200),
         lmax: Optional[int] = None,
     ) -> None:
@@ -368,9 +406,12 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         eval_ras : float or ndarray
             Right ascension(s) in radians.
         """
+        eval_decs = np.atleast_1d(eval_decs)
+        eval_ras = np.atleast_1d(eval_ras)
+
         # If there's a different number of declination and RA points, 
         # there's something wrong. 
-        if np.atleast_1d(eval_decs).shape != np.atleast_1d(eval_ras).shape:
+        if np.atleast_1d(eval_decs).shape != eval_ras.shape:
             raise RuntimeError(
                 "TemplateSmearedKingPDF::set_coordinates received different numbers"
                 f" of declination values ({np.atleast_1d(eval_decs).shape}) and"
@@ -379,8 +420,10 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
             )
 
         # If the coordinates match what we already have, do nothing.
-        if (np.equal(self.eval_decs, np.atleast_1d(eval_decs))
-            and np.equal(self.eval_ras, np.atleast_1d(eval_ras))):
+        if ((eval_decs.size==0) 
+            or ((self.eval_decs.shape == eval_decs.shape)
+                and np.equal(self.eval_decs, eval_decs)
+                and np.equal(self.eval_ras, eval_ras))):
             return
 
         self.eval_decs = np.atleast_1d(eval_decs)
@@ -515,3 +558,59 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         nbins: Optional[int] = None,
     ) -> Tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:
         raise NotImplementedError("Signal subtraction for templates is not implemented.")
+
+    def sample(
+        self,
+        n: int,
+        alpha: float,
+        beta: float,
+        rng: Optional[np.random.Generator] = None,
+        n_grid: int = 10000,
+    ) -> Tuple[npt.NDArray[np.floating], npt.NDArray[np.floating]]:
+        """
+        Sample reconstructed positions from the PSF-convolved template skymap.
+
+        Convolves the template with the King PSF in harmonic space, then draws
+        pixel indices weighted by the convolved map values. This is equivalent
+        to drawing a true position from the template and applying a King PSF
+        offset, but is more efficient because the convolution is done once for
+        the whole map rather than per-event.
+
+        Parameters
+        ----------
+        n : int
+            Number of samples to draw.
+        alpha : float
+            King distribution alpha parameter (scale) in radians.
+        beta : float
+            King distribution beta parameter (tail weight).
+        rng : np.random.Generator, optional
+            Random number generator. If None, uses np.random.default_rng().
+        n_grid : int, optional
+            Number of points in the CDF lookup grid. Higher values give more
+            accurate sampling at the cost of memory and setup time. Default
+            is 10000, which gives ~arcminute accuracy. Note that this parameter
+            is ignored for this method since the sampling is done directly from
+            the convolved map rather than via inverse CDF.
+
+        Returns
+        -------
+        reco_ra : ndarray
+            Reconstructed right ascension values in radians, shape (n,).
+        reco_dec : ndarray
+            Reconstructed declination values in radians, shape (n,).
+
+        Notes
+        -----
+        Samples land at HEALPix pixel centres. The positional resolution is
+        therefore limited by the skymap pixelisation (~`hp.nside2resol(nside)`).
+        """
+        if rng is None:
+            rng = np.random.default_rng()
+
+        convolved = self.convolve_map(alpha, beta)
+        weights = np.maximum(convolved, 0.0)
+        pixel_indices = rng.choice(len(convolved), size=n, p=weights / weights.sum())
+
+        colatitude, longitude = hp.pix2ang(self.nside, pixel_indices)
+        return longitude, np.pi / 2 - colatitude  # reco_ra, reco_dec
