@@ -40,8 +40,18 @@ jobs:
         continue-on-error: true  # Don't fail CI on type errors yet
 
   test:
-    name: Tests - Python 3.12
+    name: Tests - ${{ matrix.test_file }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        test_file:
+          - test_basic
+          - test_king_pdf
+          - test_interpolated_king_pdf
+          - test_template_smeared_king_pdf
+          - test_utils
+          - test_fitting
 
     steps:
       - name: Checkout code
@@ -60,21 +70,16 @@ jobs:
 
       - name: Run tests
         run: |
-          pytest tests/ --cov=kingmaker --cov-report=xml --cov-report=term -v
+          pytest tests/${{ matrix.test_file }}.py --cov=kingmaker --cov-report=xml --cov-report=term -v
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          file: ./coverage.xml
+          files: ./coverage.xml
+          flags: ${{ matrix.test_file }}
           fail_ci_if_error: true
         continue-on-error: true  # Don't fail CI if Codecov upload fails
-
-      - name: Upload test results to Codecov
-        if: ${{ !cancelled() }}
-        uses: codecov/test-results-action@v1
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
           
   build:
     name: Build Distribution
