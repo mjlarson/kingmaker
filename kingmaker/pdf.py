@@ -127,10 +127,10 @@ class KingPDF:
         # Scalar-like: check if we can shortcut using the angular cutoff
         if np.isscalar(x):
             if x > self.angular_cutoff:
-                return 0
+                return 1
         elif len(x) == 1:
             if x[0] > self.angular_cutoff:
-                return 0
+                return 1
 
         # Broadcast
         x, alpha, beta = np.broadcast_arrays(x, alpha, beta)

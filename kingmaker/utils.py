@@ -82,24 +82,19 @@ def _interp2d(x, y, xp, yp, z, result):
     if yidx > ymax:
         yidx = ymax
 
-    # If it's in the corners, return a value immediately.
-    if (xidx in [1, xmax]) and (yidx in [1, ymax]):
-        result[0] = z[xidx, yidx]
+    # Get the coordinates for the surrounding box
+    left, right = xp[xidx - 1], xp[xidx]
+    bottom, top = yp[yidx - 1], yp[yidx]
 
-    # Otherwise get the coordinates for the surrounding box
-    else:
-        left, right = xp[xidx - 1], xp[xidx]
-        bottom, top = yp[yidx - 1], yp[yidx]
+    # Get the values at the 4 surrounding points
+    z_left_bottom, z_right_bottom = z[xidx - 1, yidx - 1], z[xidx, yidx - 1]
+    z_left_top, z_right_top = z[xidx - 1, yidx], z[xidx, yidx]
 
-        # Get the values at the 4 surrounding points
-        z_left_bottom, z_right_bottom = z[xidx - 1, yidx - 1], z[xidx, yidx - 1]
-        z_left_top, z_right_top = z[xidx - 1, yidx], z[xidx, yidx]
+    z_bottom = _interp1d(x, left, right, z_left_bottom, z_right_bottom)
+    z_top = _interp1d(x, left, right, z_left_top, z_right_top)
 
-        z_bottom = _interp1d(x, left, right, z_left_bottom, z_right_bottom)
-        z_top = _interp1d(x, left, right, z_left_top, z_right_top)
-
-        # And return the interpolation between the low and high
-        result[0] = _interp1d(y, bottom, top, z_bottom, z_top)
+    # And return the interpolation between the low and high
+    result[0] = _interp1d(y, bottom, top, z_bottom, z_top)
 
 
 def map2nside(skymap: npt.NDArray[np.floating]) -> int:

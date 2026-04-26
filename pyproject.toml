@@ -8,7 +8,7 @@ description='A library for building and using King/Moffat distributions for poin
 readme = "README.md"
 authors= [ {name='Michael Larson', email='mlarson@icecube.wisc.edu'} ]
 dependencies = [
-    'numpy',
+    'numpy>2',
     'scipy',
     'numba',
     'matplotlib',

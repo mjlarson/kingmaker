@@ -73,7 +73,9 @@ def _unnormalized_cdf(
     # Use the unnormalized PDF (given in 1/sr) and scale by the annulus area (~cos(dx))
     unnormalized = _unnormalized_pdf(points, alpha, beta)
     solid_angle = 2 * np.pi * np.abs(np.cos(points[1:]) - np.cos(points[:-1]))
-    integrand = np.append([0.0], np.cumsum(unnormalized[1:] * np.abs(solid_angle)))
+    integrand = np.append(
+        [0.0], np.cumsum((unnormalized[:-1] + unnormalized[1:]) / 2 * np.abs(solid_angle))
+    )
     return np.interp(x, points, integrand)
 
 
