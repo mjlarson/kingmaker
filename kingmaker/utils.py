@@ -69,14 +69,11 @@ def _interp2d(x, y, xp, yp, z, result):
     xidx = np.searchsorted(xp, x, "right")
     yidx = np.searchsorted(yp, y, "right")
 
-    # Check for edge cases
-    # Handle underflow by pinning it to the first value
+    # Clamp indices and coordinates to the grid boundary.
     if xidx == 0:
         xidx = 1
     if yidx == 0:
         yidx = 1
-
-    # Overflow is at or above the max edge. Set it to the last value.
     if xidx > xmax:
         xidx = xmax
     if yidx > ymax:
@@ -85,6 +82,10 @@ def _interp2d(x, y, xp, yp, z, result):
     # Get the coordinates for the surrounding box
     left, right = xp[xidx - 1], xp[xidx]
     bottom, top = yp[yidx - 1], yp[yidx]
+
+    # Clamp query point so _interp1d doesn't extrapolate beyond the edge.
+    x = max(left, min(right, x))
+    y = max(bottom, min(top, y))
 
     # Get the values at the 4 surrounding points
     z_left_bottom, z_right_bottom = z[xidx - 1, yidx - 1], z[xidx, yidx - 1]
