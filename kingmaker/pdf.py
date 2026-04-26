@@ -1,9 +1,8 @@
 from typing import Optional, Tuple, Union
-import os
 import numpy as np
 import numpy.typing as npt
 import healpy as hp
-from scipy.integrate import trapezoid
+from scipy.interpolate import interpn
 from scipy.special import legendre_p_all, sph_harm_y_all
 
 from .distribution import _log10pi
@@ -80,7 +79,7 @@ class KingPDF:
         if np.isscalar(x):
             if x > self.angular_cutoff:
                 return 0
-        elif len(x) == 1:
+        elif (x.shape)==1 and (len(x) == 1):
             if x[0] > self.angular_cutoff:
                 return 0
 
@@ -326,8 +325,23 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         Grid of beta values for normalization interpolation.
     lmax : int, optional
         Maximum spherical harmonic degree. Default is 3*nside-1.
+    interpolation_method : {"nearest", "linear"}, optional
+        Method used in get_king_b_l to look up b_l coefficients from the
+        precomputed grid. "nearest" (default) snaps to the closest grid point,
+        returning one unique b_l vector per distinct grid cell limiting the
+        number of maps generated and improving efficiency. The "linear" option
+        bilinearly interpolates in log(alpha), log(beta) space.
+    memory_limit_gb : float, optional
+        Memory budget in GB for the sph_harm_y_all array allocated in
+        set_coordinates. Points are processed in batches sized so that each
+        batch stays within this limit. Default is 1.0 GB. At nside=256
+        (lmax=767) each point costs ~9.4 MB, so the default allows ~100 points
+        per batch; at nside=512 (lmax=1535) each point costs ~37.7 MB, so the
+        default allows ~26 points per batch.
     """
     skymap : npt.NDArray[np.floating]
+    bl_grid: npt.NDArray[np.floating]
+    interpolation_method: str
     eval_decs : npt.NDArray[np.floating] = np.array([], dtype=np.float32)
     eval_ras: npt.NDArray[np.floating] = np.array([], dtype=np.float32)
 
@@ -338,10 +352,19 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         eval_decs: Optional[Union[float, npt.NDArray[np.floating]]] = None,
         eval_ras: Optional[Union[float, npt.NDArray[np.floating]]] = None,
         angular_cutoff: float = np.pi,
-        points_alpha: npt.NDArray[np.floating] = np.logspace(-4, _log10pi + 1e-2, 200),
-        points_beta: npt.NDArray[np.floating] = np.logspace(0, 1, 200),
+        points_alpha: npt.NDArray[np.floating] = np.logspace(-4, _log10pi + 1e-2, 100),
+        points_beta: npt.NDArray[np.floating] = np.logspace(0, 1, 100),
         lmax: Optional[int] = None,
+        interpolation_method: str = "nearest",
+        memory_limit_gb: float = 1.0,
     ) -> None:
+        if interpolation_method not in ("nearest", "linear"):
+            raise ValueError(
+                f"interpolation_method must be 'nearest' or 'linear', got {interpolation_method!r}"
+            )
+        self.interpolation_method = interpolation_method
+        self.memory_limit_bytes = int(memory_limit_gb * 1e9)
+
         super().__init__(
             angular_cutoff=angular_cutoff,
             points_alpha=points_alpha,
@@ -355,41 +378,37 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         # Then calculate the alm coefficients needed for convolution.
         self.skymap = skymap
         normalized_skymap = skymap / skymap.sum() / hp.nside2pixarea(self.nside)
-        self.skymap_alm = hp.map2alm(normalized_skymap, lmax=self.lmax, mmax=self.mmax)
+        self.skymap_alm = hp.map2alm(normalized_skymap, lmax=self.lmax, mmax=self.mmax, iter=1)
 
-        # Precompute the indices for the spherical harmonic coefficients
-        # we'll need for convolution.
-        self.ls = np.concatenate([np.full(min(l, self.mmax) + 1, l) 
-                             for l in range(self.lmax + 1)]) # noqa: E741
-        self.ms = np.concatenate([np.arange(min(l, self.mmax) + 1) 
-                             for l in range(self.lmax + 1)])  # noqa: E741
+        # Precompute the spherical harmonic indices needed for convolution.
+        # hp.Alm.getlm builds (ls, ms) in C, avoiding a Python loop over lmax+1.
+        self.ls, self.ms = hp.Alm.getlm(self.lmax)
         self._alm_indices = hp.Alm.getidx(self.lmax, self.ls, self.ms)
-        self._m_vals = self.ms 
+
+        # Precompute weighted alm = factors * a_lm once at init so set_coordinates
+        # doesn't recompute them per call. Sort by l so np.add.reduceat can sum
+        # contributions per degree without Python-level scatter (np.add.at).
+        a_lm_flat = self.skymap_alm[self._alm_indices]
+        factors = np.where(self.ms == 0, 1.0, 2.0)
+        weighted_alm = factors * a_lm_flat
+        sort_idx = np.argsort(self.ls, kind="stable")
+        self.ls_sorted = self.ls[sort_idx]
+        self.ms_sorted = self.ms[sort_idx]
+        self.weighted_alm_sorted = weighted_alm[sort_idx]
+        self.l_starts = np.searchsorted(self.ls_sorted, np.arange(self.lmax + 1))
 
         # Set up the evaluation coordinates
         if eval_decs is not None and eval_ras is not None:
             self.set_coordinates(eval_decs, eval_ras)
 
-        # Choose a reasonable enough grid for the b_l calculation
-        # and pre-generate the Legendre polynomials we'll need.
-        # The actual values here are little awkward and arbitrary,
-        # but they should be fine for most people. Note that these
-        # are in radians, so a value of 1e-4 corresponds to about
-        # 0.0057 degrees: this is much smaller than IceCube's 
-        # typical angular resolution. Since these are expensive,
-        # we can cache them to disk once and just load them for
-        # all future coefficients.
-        if not os.path.exists("precomputed_legendre.npz"):
-            #print("Generating and storing Legendre polynomials for convolution...")
-            self.theta_grid = np.concatenate([[0.0], np.logspace(-4, np.log10(self.angular_cutoff), 1000)])
-            P_all = legendre_p_all(1024, np.cos(self.theta_grid))[0]
-            np.savez("precomputed_legendre.npz", theta_grid=self.theta_grid, P_all=P_all)
-            self.P_all = P_all[:self.lmax + 1]
-        else:
-            #print("Loading precomputed Legendre polynomials for convolution...")
-            precomputed = np.load("precomputed_legendre.npz")
-            self.theta_grid = precomputed["theta_grid"]
-            self.P_all = precomputed["P_all"][:self.lmax + 1]
+        # Pre-generate the Legendre polynomials needed for b_l calculations.
+        # The theta grid is log-spaced so it resolves the PSF core accurately
+        # down to ~0.0057 degrees (1e-4 rad), well below IceCube's resolution.
+        self.theta_grid = np.concatenate([[0.0], np.logspace(-4, np.log10(self.angular_cutoff), 1000)])
+        P_all = legendre_p_all(self.lmax, np.cos(self.theta_grid))[0]
+        self.P_all = P_all[:self.lmax + 1]
+
+        self.bl_grid = self.precompute_bl_grid()
 
     def set_coordinates(
         self,
@@ -421,29 +440,35 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
 
         # If the coordinates match what we already have, do nothing.
         if ((eval_decs.size==0) 
-            or ((self.eval_decs.shape == eval_decs.shape)
-                and np.equal(self.eval_decs, eval_decs)
-                and np.equal(self.eval_ras, eval_ras))):
+            or (np.all(np.equal(self.eval_decs.shape, eval_decs.shape))
+                and np.all(np.equal(self.eval_decs, eval_decs))
+                and np.all(np.equal(self.eval_ras, eval_ras)))):
             return
 
         self.eval_decs = np.atleast_1d(eval_decs)
         self.eval_ras = np.atleast_1d(eval_ras)
         assert self.eval_decs.shape == self.eval_ras.shape
 
-        # Compute all Y_lm at once: shape (lmax+1, 2*mmax+1, npts)
-        # m axis ordering: 0, +1, +2, ..., +mmax, -mmax, ..., -1
-        raw = sph_harm_y_all(self.lmax, self.mmax, np.pi/2 - self.eval_decs, self.eval_ras)
-        
-        # Extract all needed Y_lm at once: shape (nalm, npts)
-        Y_lm_all = raw[self.ls, self.ms, :]  # advanced indexing, no loop
-        a_lm_all = self.skymap_alm[self._alm_indices]  # shape (nalm,)
-        contribs = np.real(a_lm_all[:, None] * Y_lm_all)  # (nalm, npts)
-        factors = np.where(self._m_vals == 0, 1.0, 2.0)   # (nalm,)
-
-        # Accumulate per l
         npts = len(self.eval_decs)
+
+        # sph_harm_y_all returns shape (lmax+1, 2*mmax+1, batch) in complex128.
+        # Batch over points so the raw array stays within memory_limit_bytes.
+        bytes_per_point = np.complex128().nbytes * (self.lmax + 1) * (2 * self.mmax + 1)
+        batch_size = max(1, self.memory_limit_bytes // bytes_per_point)
+
         self._c_l = np.zeros((self.lmax + 1, npts), dtype=np.float64)
-        np.add.at(self._c_l, self.ls, factors[:, None] * contribs)
+        for start in range(0, npts, batch_size):
+            end = min(start + batch_size, npts)
+            raw = sph_harm_y_all(
+                self.lmax, self.mmax,
+                np.pi / 2 - self.eval_decs[start:end],
+                self.eval_ras[start:end],
+            )
+            # Use l-sorted alm order so reduceat can sum contributions per degree
+            # with a single contiguous-segment reduction instead of Python scatter.
+            Y_lm_sorted = raw[self.ls_sorted, self.ms_sorted, :]              # (nalm, batch)
+            contribs = np.real(self.weighted_alm_sorted[:, None] * Y_lm_sorted)  # (nalm, batch)
+            self._c_l[:, start:end] = np.add.reduceat(contribs, self.l_starts, axis=0)
         return
 
     def skymap_to_alm(self) -> npt.NDArray[np.complexfloating]:
@@ -457,13 +482,69 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         """
         return hp.map2alm(self.skymap, lmax=self.lmax, mmax=self.mmax)
 
+    def precompute_bl_grid(self) -> npt.NDArray[np.floating]:
+        """
+        Precompute b_l coefficients for all (alpha, beta) grid points via matmul.
+
+        Evaluates the King PDF over the full (n_alpha, n_beta, n_theta) parameter
+        grid, then computes all b_l integrals in a single matrix multiply rather
+        than calling get_king_b_l once per grid point. Peak memory scales as
+        O(n_alpha * n_beta * n_theta), replacing the naive approach that would
+        require O(lmax * n_alpha * n_beta * n_theta).
+
+        Returns
+        -------
+        ndarray, shape (n_alpha, n_beta, lmax + 1)
+            Spherical harmonic b_l coefficients for each (alpha, beta) grid point,
+            stored in interpn-ready axis order.
+        """
+        n_alpha = len(self.points_alpha)
+        n_beta  = len(self.points_beta)
+        theta   = self.theta_grid
+        n_theta = len(theta)
+
+        # Evaluate the King PDF over the full (n_alpha, n_beta, n_theta) grid.
+        # Compute normalisation constants once per (alpha, beta) pair and broadcast
+        # over theta, avoiding n_theta redundant norm lookups per grid point.
+        alpha_g, beta_g = np.meshgrid(self.points_alpha, self.points_beta, indexing="ij")
+        norms = 10 ** _interp2d(
+            np.log10(alpha_g), np.log10(beta_g),
+            self.log10_points_alpha, self.log10_points_beta,
+            self.log10_grid_norms,
+        )  # (n_alpha, n_beta)
+        unnorm = _unnormalized_pdf(
+            theta[None, None, :], alpha_g[:, :, None], beta_g[:, :, None]
+        )  # (n_alpha, n_beta, n_theta)
+        pdf_vals = norms[:, :, None] * unnorm
+
+        # Trapezoid quadrature weights for the non-uniform log-spaced theta grid.
+        w = np.empty(n_theta)
+        w[1:-1] = (theta[2:] - theta[:-2]) / 2
+        w[0]    = (theta[1]  - theta[0])   / 2
+        w[-1]   = (theta[-1] - theta[-2])  / 2
+
+        # Absorb 2pi * sin(theta) * w into P_all once to form P_weighted, then
+        # use a single BLAS matmul instead of lmax+1 separate trapezoid calls.
+        P_weighted = self.P_all * (2 * np.pi * np.sin(theta) * w)  # (lmax+1, n_theta)
+        pdf_flat   = pdf_vals.reshape(n_alpha * n_beta, n_theta)
+        bl_flat    = P_weighted @ pdf_flat.T                        # (lmax+1, n_alpha * n_beta)
+
+        # Store as (n_alpha, n_beta, lmax+1) so interpn can use it directly
+        # without a transpose on every get_king_b_l call.
+        return bl_flat.reshape(self.lmax + 1, n_alpha, n_beta).transpose(1, 2, 0)
+
     def get_king_b_l(
         self, alpha: float, beta: float) -> npt.NDArray[np.floating]:
         """
-        Compute spherical harmonic expansion coefficients b_l for the King PDF.
+        Return spherical harmonic expansion coefficients b_l for the King PDF.
 
-        Integrates King PDF against Legendre polynomials to obtain coefficients
-        for harmonic convolution.
+        Looks up b_l values from the precomputed grid (see precompute_bl_grid)
+        using the interpolation method selected at initialization.
+
+        "nearest" snaps to the closest (alpha, beta) grid point in log space,
+        so events that fall in the same grid cell reuse the same b_l vector
+        without triggering a new map convolution.  "linear" bilinearly
+        interpolates in log(alpha), log(beta) space for smoother variation.
 
         Parameters
         ----------
@@ -477,33 +558,31 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         ndarray
             Spherical harmonic coefficients b_l for degrees 0 to lmax.
         """
-        pdf_vals = self.pdf(self.theta_grid, alpha, beta)
-        return 2 * np.pi * trapezoid(self.P_all * pdf_vals * np.sin(self.theta_grid), x=self.theta_grid)
+        log_a = np.log10(alpha)
+        log_b = np.log10(beta)
+        if self.interpolation_method == "nearest":
+            i = np.searchsorted(self.log10_points_alpha, log_a)
+            j = np.searchsorted(self.log10_points_beta,  log_b)
+            i = np.clip(i, 1, len(self.log10_points_alpha) - 1)
+            j = np.clip(j, 1, len(self.log10_points_beta)  - 1)
 
-    #--------------------------------------------------------
-    # Vectorized over the whole grid at once
-    #def _precompute_bl_grid(self):
-    #    # pdf evaluates fine over arrays
-    #    # self._theta_grid: (npoints,)
-    #    # pdf_vals: (n_alpha, n_beta, npoints) via broadcasting
-    #    alpha_grid, beta_grid = np.meshgrid(self.points_alpha, self.points_beta, indexing="ij")
-    #    # shape: (n_alpha, n_beta, npoints)
-    #    pdf_vals = self.pdf(
-    #        self._theta_grid[None, None, :], alpha_grid[:, :, None], beta_grid[:, :, None]
-    #    )
-    #    # _P_all: (lmax+1, npoints) -> integrate against each pdf
-    #    # trapezoid over last axis
-    #    integrand = pdf_vals * self._sin_theta[None, None, :]  # (n_alpha, n_beta, npoints)
-    #    # (lmax+1, npoints) @ (npoints, n_alpha*n_beta) -> (lmax+1, n_alpha*n_beta)
-    #    bl_grid = (
-    #        2
-    #        * np.pi
-    #        * np.trapz(
-    #            self._P_all[:, None, None, :] * integrand[None, :, :, :], dx=self._dtheta, axis=-1
-    #        )
-    #    )  # (lmax+1, n_alpha, n_beta)
-    #    self._bl_grid = bl_grid.transpose(1, 2, 0)  # (n_alpha, n_beta, lmax+1)
-    # --------------------------------------------------------
+            # Adjust i and j to snap to the nearest grid point in log space
+            # since searchsorted gives index of the right edge of the bin.
+            if log_a - self.log10_points_alpha[i - 1] < self.log10_points_alpha[i] - log_a:
+                i -= 1
+            if log_b - self.log10_points_beta[j - 1] < self.log10_points_beta[j] - log_b:
+                j -= 1
+            return self.bl_grid[i, j]
+
+        # "linear"
+        result = interpn(
+            (self.log10_points_alpha, self.log10_points_beta),
+            self.bl_grid,  # (n_alpha, n_beta, lmax+1)
+            np.array([[log_a, log_b]]),
+            method="linear",
+            bounds_error=True,
+        )
+        return result[0]
 
     def convolve_map(self, alpha: float, beta: float) -> npt.NDArray[np.floating]:
         """
