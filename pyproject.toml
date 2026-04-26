@@ -24,9 +24,15 @@ dev = [
   "pytest",
   "pytest-cov",
 ]
+docs = [
+  "sphinx",
+  "furo",
+  "myst-parser",
+  "sphinx-autodoc-typehints",
+]
 
 [project.urls]
-Documentation = "https://docs.icecube.aq/csky/main/"
+Documentation = "https://kingmaker.readthedocs.io/en/latest/"
 Source = "https://github.com/mjlarson/kingmaker/"
 
 [tool.setuptools]
