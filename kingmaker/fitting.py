@@ -278,7 +278,7 @@ class KingPSFFitter:
                     "true_energy"
                 ] ** (-gamma)
             else:
-                base_weights = np.ones(len(self.signal_events))
+                weights = np.ones(len(self.signal_events))
 
             # Iterate over all bin combinations
             n_fitted = 0

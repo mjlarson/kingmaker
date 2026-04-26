@@ -3,7 +3,6 @@ import numpy as np
 import numpy.typing as npt
 from numba import guvectorize, njit
 from numba import float32, float64
-from scipy.special import sph_harm_y_all
 
 _log10pi: float = np.log10(np.pi)
 

@@ -5,7 +5,7 @@ from os.path import exists
 import logging
 import numpy as np
 import healpy as hp
-from scipy.interpolate import interp1d, interpn
+from scipy.interpolate import interpn
 
 from .pdf import InterpolatedKingPDF, TemplateSmearedKingPDF
 from .fitting import KingPSFFitter
