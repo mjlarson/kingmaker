@@ -24,6 +24,7 @@ class KingSpatialLikelihood:
     observable parameters and the provided binning, and then evaluate the PDF or template-smoothed PDF at the event's
     reconstructed equatorial position.
     """
+
     # Configuration parameters
     parametrization_bins: Dict[str, npt.NDArray[np.floating]]
     spectral_indices: npt.NDArray[np.floating]
@@ -34,7 +35,7 @@ class KingSpatialLikelihood:
     # Store an instance of the PDF class to use for evaluations. This will be
     # either a InterpolatedKingPDF (point source) or a TemplateSmearedKingPDF
     # (extended source with skymap).
-    king_pdf: InterpolatedKingPDF 
+    king_pdf: InterpolatedKingPDF
     template_pdf: TemplateSmearedKingPDF
     nside: int
 
@@ -71,7 +72,7 @@ class KingSpatialLikelihood:
         # or minimum counts since they're only necessary for fitting during
         # initialization andnot for later evaluation. We'll also be storing
         # the parametrization bins later, since the user may have simply
-        # passed in a number of bins instead of actual bin edges. 
+        # passed in a number of bins instead of actual bin edges.
         self.spectral_indices = np.atleast_1d(spectral_indices)
         self.skymap = skymap
 
@@ -83,19 +84,19 @@ class KingSpatialLikelihood:
         # Obtain the King distribution parameters for all bins. If we're caching parameters
         # and a cache file exists, load from the cache instead of fitting. Otherwise,
         # run the fitter and potentially cache the results.
-        fitted_parameters : Dict[str, npt.NDArray[np.floating]] = {}
+        fitted_parameters: Dict[str, npt.NDArray[np.floating]] = {}
         if cache_parameters and (cache_name is not None) and exists(cache_name):
             fitted_parameters_npz = np.load(cache_name)
             for key in fitted_parameters_npz.files:
                 fitted_parameters[key] = fitted_parameters_npz[key]
         else:
             fitter = KingPSFFitter(
-                signal_events = signal_events,
-                parametrization_bins = parametrization_bins,
-                dpsi_nbins = dpsi_nbins, 
-                minimum_counts = minimum_counts,
-                spectral_indices = spectral_indices,
-                angular_cutoff = angular_cutoff,
+                signal_events=signal_events,
+                parametrization_bins=parametrization_bins,
+                dpsi_nbins=dpsi_nbins,
+                minimum_counts=minimum_counts,
+                spectral_indices=spectral_indices,
+                angular_cutoff=angular_cutoff,
             )
             fitted_parameters = fitter.fit_all_bins(verbose=True)
             if cache_parameters and (cache_name is not None):
@@ -118,9 +119,12 @@ class KingSpatialLikelihood:
 
         return
 
-    def set_events(self, events: npt.NDArray[Any],
-                   source_ras : Optional[npt.NDArray[np.floating]] = None,
-                   source_decs : Optional[npt.NDArray[np.floating]] = None) -> None:
+    def set_events(
+        self,
+        events: npt.NDArray[Any],
+        source_ras: Optional[npt.NDArray[np.floating]] = None,
+        source_decs: Optional[npt.NDArray[np.floating]] = None,
+    ) -> None:
         """Calculate the King distribution parameters (alpha and beta) for a given set of events by interpolating
         the fitted parameters based on the event parameters and the provided binning. Then calculate the pvalues
         for each spectral index for each event and store them so we can interpolate them at runtime.
@@ -132,15 +136,21 @@ class KingSpatialLikelihood:
         # The source_ras and source_decs must be specified unless we're using the
         # template PDF. Ensure that this is the case and raise an error if not.
         if self.skymap is None and (source_ras is None or source_decs is None):
-            raise ValueError("This instance of the KingSpatialLikelihood was not configured with"
-                             " a skymap, suggesting that this should be a point source analysis."
-                             " However, no source locations were provided. Please ensure that"
-                             " source_ras and source_decs are provided when calling set_events.")
-        
+            raise ValueError(
+                "This instance of the KingSpatialLikelihood was not configured with"
+                " a skymap, suggesting that this should be a point source analysis."
+                " However, no source locations were provided. Please ensure that"
+                " source_ras and source_decs are provided when calling set_events."
+            )
+
         # Make sure we have a matching number of source_ras and source_decs if we're given multiple sources.
-        if (source_ras is not None and source_decs is not None) and (len(source_ras) != len(source_decs)):
-            raise ValueError("The number of source_ras and source_decs must match. Please ensure " \
-                             "that these arrays have the same length when passing into set_events.")
+        if (source_ras is not None and source_decs is not None) and (
+            len(source_ras) != len(source_decs)
+        ):
+            raise ValueError(
+                "The number of source_ras and source_decs must match. Please ensure "
+                "that these arrays have the same length when passing into set_events."
+            )
 
         # Begin by finding the per-event alpha and beta values via interpolation.
         # Extract the bin centers and keys for each event. The stored bins are
@@ -186,15 +196,18 @@ class KingSpatialLikelihood:
         # TODO: Ensure the broadcasting works properly here if we have multiple sources...
         else:
             self.event_distances = angular_distance(
-                events["ra"], events["dec"], source_ras, source_decs)
+                events["ra"], events["dec"], source_ras, source_decs
+            )
             if (not self.multiple_source_warning_logged) and (len(source_ras) > 1):
-                logging.warning("Multiple source positions provided. This has not been tested and"
-                                " may not work as expected. Please check the results carefully!")
+                logging.warning(
+                    "Multiple source positions provided. This has not been tested and"
+                    " may not work as expected. Please check the results carefully!"
+                )
                 self.multiple_source_warning_logged = True
             for gamma in self.spectral_indices:
-                self.event_pvalue[gamma] = self.king_pdf.pdf(self.event_distances,
-                                                            self.event_alpha[gamma],
-                                                            self.event_beta[gamma])
+                self.event_pvalue[gamma] = self.king_pdf.pdf(
+                    self.event_distances, self.event_alpha[gamma], self.event_beta[gamma]
+                )
         return
 
     def evaluate_pdf(self, events: npt.NDArray[Any], gamma: float = 2) -> npt.NDArray[np.floating]:
@@ -206,18 +219,20 @@ class KingSpatialLikelihood:
             )
 
         if not np.array_equal(self.events, events):
-             raise RuntimeError(
+            raise RuntimeError(
                 "The events provided to evaluate_pdf do not match the events that were used to calculate the per-event parameters."
                 " Please ensure that you call set_events with the same events that you later pass into evaluate_pdf."
             )
-        
+
         if gamma in self.spectral_indices:
             # If the requested gamma is one of the fitted spectral indices, we can directly use those parameters.
             return self.event_pvalue[gamma]
         else:
             # Otherwise we have to interpolate the gamma values.
             pvalues = np.array([self.event_pvalue[g] for g in self.spectral_indices])
-            idx = np.clip(np.searchsorted(self.spectral_indices, gamma) - 1, 0, len(self.spectral_indices) - 2)
+            idx = np.clip(
+                np.searchsorted(self.spectral_indices, gamma) - 1, 0, len(self.spectral_indices) - 2
+            )
             t = (gamma - self.spectral_indices[idx]) / (
                 self.spectral_indices[idx + 1] - self.spectral_indices[idx]
             )

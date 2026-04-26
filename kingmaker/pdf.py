@@ -79,7 +79,7 @@ class KingPDF:
         if np.isscalar(x):
             if x > self.angular_cutoff:
                 return 0
-        elif (x.shape)==1 and (len(x) == 1):
+        elif (x.shape) == 1 and (len(x) == 1):
             if x[0] > self.angular_cutoff:
                 return 0
 
@@ -272,7 +272,7 @@ class InterpolatedKingPDF(KingPDF):
     points_alpha : ndarray, optional
         Grid of alpha values for normalization interpolation. Unit: radians
     points_beta : ndarray, optional
-        Grid of beta values for normalization interpolation. 
+        Grid of beta values for normalization interpolation.
     """
 
     def __init__(
@@ -284,7 +284,10 @@ class InterpolatedKingPDF(KingPDF):
     ) -> None:
         super().__init__(angular_cutoff=angular_cutoff)
         self.points_alpha, self.points_beta = points_alpha, points_beta
-        self.log10_points_alpha, self.log10_points_beta = np.log10(points_alpha), np.log10(points_beta)
+        self.log10_points_alpha, self.log10_points_beta = (
+            np.log10(points_alpha),
+            np.log10(points_beta),
+        )
         grid_alpha, grid_beta = np.meshgrid(self.points_alpha, self.points_beta)
         self.log10_grid_norms = np.log10(_norm(grid_alpha, grid_beta, self.angular_cutoff).T)
 
@@ -294,11 +297,19 @@ class InterpolatedKingPDF(KingPDF):
         beta: Union[float, npt.NDArray[np.floating]],
     ) -> Union[float, npt.NDArray[np.floating]]:
         if np.any(alpha < self.points_alpha[0]) or np.any(alpha > self.points_alpha[-1]):
-            raise ValueError(f"Alpha value {alpha} must be within the interpolation grid: alpha in [{self.points_alpha[0]}, {self.points_alpha[-1]}]")
+            raise ValueError(
+                f"Alpha value {alpha} must be within the interpolation grid: alpha in [{self.points_alpha[0]}, {self.points_alpha[-1]}]"
+            )
         if np.any(beta < self.points_beta[0]) or np.any(beta > self.points_beta[-1]):
-            raise ValueError(f"Beta value {beta} must be within the interpolation grid: beta in [{self.points_beta[0]}, {self.points_beta[-1]}]")
+            raise ValueError(
+                f"Beta value {beta} must be within the interpolation grid: beta in [{self.points_beta[0]}, {self.points_beta[-1]}]"
+            )
         return 10 ** _interp2d(
-            np.log10(alpha), np.log10(beta), self.log10_points_alpha, self.log10_points_beta, self.log10_grid_norms
+            np.log10(alpha),
+            np.log10(beta),
+            self.log10_points_alpha,
+            self.log10_points_beta,
+            self.log10_grid_norms,
         )
 
 
@@ -339,10 +350,11 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         per batch; at nside=512 (lmax=1535) each point costs ~37.7 MB, so the
         default allows ~26 points per batch.
     """
-    skymap : npt.NDArray[np.floating]
+
+    skymap: npt.NDArray[np.floating]
     bl_grid: npt.NDArray[np.floating]
     interpolation_method: str
-    eval_decs : npt.NDArray[np.floating] = np.array([], dtype=np.float32)
+    eval_decs: npt.NDArray[np.floating] = np.array([], dtype=np.float32)
     eval_ras: npt.NDArray[np.floating] = np.array([], dtype=np.float32)
 
     def __init__(
@@ -404,9 +416,11 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         # Pre-generate the Legendre polynomials needed for b_l calculations.
         # The theta grid is log-spaced so it resolves the PSF core accurately
         # down to ~0.0057 degrees (1e-4 rad), well below IceCube's resolution.
-        self.theta_grid = np.concatenate([[0.0], np.logspace(-4, np.log10(self.angular_cutoff), 1000)])
+        self.theta_grid = np.concatenate(
+            [[0.0], np.logspace(-4, np.log10(self.angular_cutoff), 1000)]
+        )
         P_all = legendre_p_all(self.lmax, np.cos(self.theta_grid))[0]
-        self.P_all = P_all[:self.lmax + 1]
+        self.P_all = P_all[: self.lmax + 1]
 
         self.bl_grid = self.precompute_bl_grid()
 
@@ -428,8 +442,8 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         eval_decs = np.atleast_1d(eval_decs)
         eval_ras = np.atleast_1d(eval_ras)
 
-        # If there's a different number of declination and RA points, 
-        # there's something wrong. 
+        # If there's a different number of declination and RA points,
+        # there's something wrong.
         if np.atleast_1d(eval_decs).shape != eval_ras.shape:
             raise RuntimeError(
                 "TemplateSmearedKingPDF::set_coordinates received different numbers"
@@ -439,10 +453,11 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
             )
 
         # If the coordinates match what we already have, do nothing.
-        if ((eval_decs.size==0) 
-            or (np.all(np.equal(self.eval_decs.shape, eval_decs.shape))
-                and np.all(np.equal(self.eval_decs, eval_decs))
-                and np.all(np.equal(self.eval_ras, eval_ras)))):
+        if (eval_decs.size == 0) or (
+            np.all(np.equal(self.eval_decs.shape, eval_decs.shape))
+            and np.all(np.equal(self.eval_decs, eval_decs))
+            and np.all(np.equal(self.eval_ras, eval_ras))
+        ):
             return
 
         self.eval_decs = np.atleast_1d(eval_decs)
@@ -460,13 +475,14 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         for start in range(0, npts, batch_size):
             end = min(start + batch_size, npts)
             raw = sph_harm_y_all(
-                self.lmax, self.mmax,
+                self.lmax,
+                self.mmax,
                 np.pi / 2 - self.eval_decs[start:end],
                 self.eval_ras[start:end],
             )
             # Use l-sorted alm order so reduceat can sum contributions per degree
             # with a single contiguous-segment reduction instead of Python scatter.
-            Y_lm_sorted = raw[self.ls_sorted, self.ms_sorted, :]              # (nalm, batch)
+            Y_lm_sorted = raw[self.ls_sorted, self.ms_sorted, :]  # (nalm, batch)
             contribs = np.real(self.weighted_alm_sorted[:, None] * Y_lm_sorted)  # (nalm, batch)
             self._c_l[:, start:end] = np.add.reduceat(contribs, self.l_starts, axis=0)
         return
@@ -499,8 +515,8 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
             stored in interpn-ready axis order.
         """
         n_alpha = len(self.points_alpha)
-        n_beta  = len(self.points_beta)
-        theta   = self.theta_grid
+        n_beta = len(self.points_beta)
+        theta = self.theta_grid
         n_theta = len(theta)
 
         # Evaluate the King PDF over the full (n_alpha, n_beta, n_theta) grid.
@@ -508,8 +524,10 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         # over theta, avoiding n_theta redundant norm lookups per grid point.
         alpha_g, beta_g = np.meshgrid(self.points_alpha, self.points_beta, indexing="ij")
         norms = 10 ** _interp2d(
-            np.log10(alpha_g), np.log10(beta_g),
-            self.log10_points_alpha, self.log10_points_beta,
+            np.log10(alpha_g),
+            np.log10(beta_g),
+            self.log10_points_alpha,
+            self.log10_points_beta,
             self.log10_grid_norms,
         )  # (n_alpha, n_beta)
         unnorm = _unnormalized_pdf(
@@ -520,21 +538,20 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         # Trapezoid quadrature weights for the non-uniform log-spaced theta grid.
         w = np.empty(n_theta)
         w[1:-1] = (theta[2:] - theta[:-2]) / 2
-        w[0]    = (theta[1]  - theta[0])   / 2
-        w[-1]   = (theta[-1] - theta[-2])  / 2
+        w[0] = (theta[1] - theta[0]) / 2
+        w[-1] = (theta[-1] - theta[-2]) / 2
 
         # Absorb 2pi * sin(theta) * w into P_all once to form P_weighted, then
         # use a single BLAS matmul instead of lmax+1 separate trapezoid calls.
         P_weighted = self.P_all * (2 * np.pi * np.sin(theta) * w)  # (lmax+1, n_theta)
-        pdf_flat   = pdf_vals.reshape(n_alpha * n_beta, n_theta)
-        bl_flat    = P_weighted @ pdf_flat.T                        # (lmax+1, n_alpha * n_beta)
+        pdf_flat = pdf_vals.reshape(n_alpha * n_beta, n_theta)
+        bl_flat = P_weighted @ pdf_flat.T  # (lmax+1, n_alpha * n_beta)
 
         # Store as (n_alpha, n_beta, lmax+1) so interpn can use it directly
         # without a transpose on every get_king_b_l call.
         return bl_flat.reshape(self.lmax + 1, n_alpha, n_beta).transpose(1, 2, 0)
 
-    def get_king_b_l(
-        self, alpha: float, beta: float) -> npt.NDArray[np.floating]:
+    def get_king_b_l(self, alpha: float, beta: float) -> npt.NDArray[np.floating]:
         """
         Return spherical harmonic expansion coefficients b_l for the King PDF.
 
@@ -562,9 +579,9 @@ class TemplateSmearedKingPDF(InterpolatedKingPDF):
         log_b = np.log10(beta)
         if self.interpolation_method == "nearest":
             i = np.searchsorted(self.log10_points_alpha, log_a)
-            j = np.searchsorted(self.log10_points_beta,  log_b)
+            j = np.searchsorted(self.log10_points_beta, log_b)
             i = np.clip(i, 1, len(self.log10_points_alpha) - 1)
-            j = np.clip(j, 1, len(self.log10_points_beta)  - 1)
+            j = np.clip(j, 1, len(self.log10_points_beta) - 1)
 
             # Adjust i and j to snap to the nearest grid point in log space
             # since searchsorted gives index of the right edge of the bin.

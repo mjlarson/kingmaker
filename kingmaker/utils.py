@@ -102,6 +102,7 @@ def _interp2d(x, y, xp, yp, z, result):
         # And return the interpolation between the low and high
         result[0] = _interp1d(y, bottom, top, z_bottom, z_top)
 
+
 def map2nside(skymap: npt.NDArray[np.floating]) -> int:
     """
     Compute HEALPix nside parameter from skymap size.
@@ -117,6 +118,7 @@ def map2nside(skymap: npt.NDArray[np.floating]) -> int:
         HEALPix nside parameter (npix = 12 * nside^2).
     """
     return int(np.sqrt(len(skymap) / 12))
+
 
 @njit
 def angular_distance(
