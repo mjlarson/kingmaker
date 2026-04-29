@@ -9,7 +9,7 @@ from scipy.interpolate import interpn
 
 from .pdf import InterpolatedKingPDF, TemplateSmearedKingPDF
 from .fitting import KingPSFFitter
-from .utils import angular_distance
+from .utils import angular_distance, _interp1d
 
 
 class KingSpatialLikelihood:
@@ -133,12 +133,15 @@ class KingSpatialLikelihood:
         return
 
     def events_match(self, events: npt.NDArray[Any]):
+        if self.events is None:
+            return False
         try:
-            events_match = self.events == events
-            if isinstance(events_match, bool):
-                return events_match
-            else:
-                return all(events_match)
+            events_match = True
+            for key in self.events.keys():
+                events_match &= all(self.events[key] == events[key])
+                if not events_match:
+                    return False
+            return events_match
         except ValueError:
             return np.array_equal(self.events, events)
 
@@ -181,14 +184,14 @@ class KingSpatialLikelihood:
         # Begin by finding the per-event alpha and beta values via interpolation.
         # Extract the bin centers and keys for each event. The stored bins are
         # edges, but interpn requires coordinates matching the values shape.
-        keys, bins = [], []
-
+        keys, bins, event_param_values = [], [], []
         for key, edges in self.parametrization_bins.items():
             keys.append(key)
             bins.append((edges[:-1] + edges[1:]) / 2)
+            event_param_values.append(events[key])
 
         # Get the event parameter values for each parameter
-        event_param_values = np.array([events[key] for key in keys]).T
+        event_param_values = np.array(event_param_values).T
 
         # Interpolate to get the alpha and beta values for each spectral index for
         # each event in the given sample.
@@ -232,10 +235,10 @@ class KingSpatialLikelihood:
         # Otherwise, we can calculate the angular separation for each event now.
         # TODO: Ensure the broadcasting works properly here if we have multiple sources...
         else:
+            assert source_ras is not None
             self.event_distances = angular_distance(
                 events["ra"], events["dec"], source_ras, source_decs
             )
-            assert source_ras is not None
             if (not self.multiple_source_warning_logged) and (len(source_ras) > 1):
                 logging.warning(
                     "Multiple source positions provided. This has not been tested and"
@@ -267,11 +270,14 @@ class KingSpatialLikelihood:
             return cast(npt.NDArray[np.floating], self.event_pvalue[gamma])
         else:
             # Otherwise we have to interpolate the gamma values.
-            pvalues = np.array([self.event_pvalue[g] for g in self.spectral_indices])
             idx = np.clip(
                 np.searchsorted(self.spectral_indices, gamma) - 1, 0, len(self.spectral_indices) - 2
             )
-            t = (gamma - self.spectral_indices[idx]) / (
-                self.spectral_indices[idx + 1] - self.spectral_indices[idx]
+            gamma_low, gamma_high = self.spectral_indices[idx], self.spectral_indices[idx + 1]
+            return _interp1d(
+                gamma,
+                gamma_low,
+                gamma_high,
+                self.event_pvalue[gamma_low],
+                self.event_pvalue[gamma_high],
             )
-            return (1 - t) * pvalues[idx] + t * pvalues[idx + 1]  # type: ignore[no-any-return]
