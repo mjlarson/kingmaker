@@ -135,15 +135,9 @@ class KingSpatialLikelihood:
     def events_match(self, events: npt.NDArray[Any]):
         if self.events is None:
             return False
-        try:
-            events_match = True
-            for key in self.events.keys():
-                events_match &= all(self.events[key] == events[key])
-                if not events_match:
-                    return False
-            return events_match
-        except ValueError:
-            return np.array_equal(self.events, events)
+        return np.array_equal(self.events["ra"], events["ra"]) & np.array_equal(
+            self.events["dec"], events["dec"]
+        )
 
     def set_events(
         self,
