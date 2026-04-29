@@ -76,7 +76,7 @@ def _unnormalized_cdf(
     integrand = np.append(
         [0.0], np.cumsum((unnormalized[:-1] + unnormalized[1:]) / 2 * np.abs(solid_angle))
     )
-    return np.interp(x, points, integrand)
+    return np.interp(x, points, integrand)  # type: ignore[no-any-return]
 
 
 def _norm(
@@ -105,4 +105,4 @@ def _norm(
     ndarray
         Normalization constants such that PDF integrates to 1 over the sphere.
     """
-    return 1.0 / _unnormalized_cdf(maximum, alpha, beta)
+    return 1.0 / _unnormalized_cdf(maximum, alpha, beta)  # type: ignore[no-any-return]

@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union, cast
 import numpy as np
 import numpy.typing as npt
 from scipy.optimize import least_squares
@@ -20,7 +20,7 @@ class KingPSFFitter:
     signal_events : structured array
         Numpy structured array containing signal MC events. Must include:
         - 'ra', 'dec': reconstructed coordinates (radians)
-        - 'trueRa', 'trueDec': true coordinates (radians)
+        - 'true_ra', 'true_dec': true coordinates (radians)
         Additional fields can be used for parameterization binning.
     parametrization_bins : dict
         Dictionary mapping observable names to bin edges or number of bins.
@@ -34,6 +34,12 @@ class KingPSFFitter:
         Minimum number of events required in a bin for fitting. Default is 100.
     weight_field : str, optional
         Field name for oneweight. If None, equal weights are used.
+    true_ra_name : str
+        Field name for the true value of the signal events' right ascension.
+    true_dec_name : str
+        Field name for the true value of the signal events' declination.
+    true_energy_name : str
+        Field name for the true value of the signal events' energy.
     spectral_indices : array-like, optional
         Spectral indices (gamma) for reweighting. Default is [2.0].
     angular_cutoff : float, optional
@@ -62,12 +68,18 @@ class KingPSFFitter:
         dpsi_nbins: int = 101,
         minimum_counts: int = 100,
         weight_field: Optional[str] = "ow",
+        true_ra_name: str = "trueRa",
+        true_dec_name: str = "trueDec",
+        true_energy_name: str = "trueE",
         spectral_indices: Optional[Union[List[float], npt.NDArray[np.floating]]] = None,
         angular_cutoff: float = np.pi,
     ) -> None:
         """Initialize the KingPSFFitter."""
         self.signal_events = signal_events
         self.weight_field = weight_field
+        self.true_ra_name = true_ra_name
+        self.true_dec_name = true_dec_name
+        self.true_energy_name = true_energy_name
         self.dpsi_nbins = dpsi_nbins
         self.minimum_counts = minimum_counts
         self.spectral_indices = (
@@ -88,8 +100,8 @@ class KingPSFFitter:
         self.dpsi = angular_distance(
             self.signal_events["ra"],
             self.signal_events["dec"],
-            self.signal_events["trueRa"],
-            self.signal_events["trueDec"],
+            self.signal_events[self.true_ra_name],
+            self.signal_events[self.true_dec_name],
         )
 
         # Bin events
@@ -114,24 +126,20 @@ class KingPSFFitter:
         ValueError
             If required fields are missing.
         """
-        required_fields = ["ra", "dec", "trueRa", "trueDec"]
-        missing_required = [f for f in required_fields if f not in self.signal_events.dtype.names]
+        required_fields = ["ra", "dec", self.true_ra_name, self.true_dec_name]
+        names = self.signal_events.dtype.names or ()
+        missing_required = [f for f in required_fields if f not in names]
         if missing_required:
             raise ValueError(f"Signal events missing required fields: {missing_required}")
 
-        missing_params = [
-            key for key in parametrization_bins.keys() if key not in self.signal_events.dtype.names
-        ]
+        missing_params = [key for key in parametrization_bins.keys() if key not in names]
         if missing_params:
-            available = self.signal_events.dtype.names
             raise ValueError(
                 f"Parametrization fields {missing_params} not found in signal events. "
-                f"Available fields: {available}"
+                f"Available fields: {names}"
             )
 
-        if self.weight_field is not None and (
-            self.weight_field not in self.signal_events.dtype.names
-        ):
+        if self.weight_field is not None and (self.weight_field not in names):
             raise ValueError(f"Weight field '{self.weight_field}' not found in signal events.")
 
     def _setup_bins(
@@ -275,7 +283,7 @@ class KingPSFFitter:
             # Calculate event weights
             if self.weight_field is not None:
                 weights = self.signal_events[self.weight_field] * self.signal_events[
-                    "true_energy"
+                    self.true_energy_name
                 ] ** (-gamma)
             else:
                 weights = np.ones(len(self.signal_events))
@@ -321,7 +329,7 @@ class KingPSFFitter:
             "dpsi_bins": self.dpsi_bins,
             "fit_quality": self.fit_quality,
             "event_counts": self.event_counts,
-            "parametrization_bins": self.parametrization_bins,
+            "parametrization_bins": self.parametrization_bins,  # type: ignore[dict-item]
         }
 
     def _fit_single_bin(
@@ -585,7 +593,7 @@ class KingPSFFitter:
         alpha = self.fit_alpha[param_idx]
         beta = self.fit_beta[param_idx]
         dpsi_fine = np.linspace(0, min(8 * alpha, np.pi), 1000)
-        pdf_fit = self.king_pdf.pdf(dpsi_fine, alpha, beta)
+        pdf_fit = cast(npt.NDArray[np.floating], self.king_pdf.pdf(dpsi_fine, alpha, beta))
         pdf_fit *= hist[mask].max() / pdf_fit.max()  # Normalize for visualization
 
         ax.plot(np.degrees(dpsi_fine), pdf_fit, "-", linewidth=2, label="King Fit", color="blue")

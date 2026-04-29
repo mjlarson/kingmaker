@@ -1,4 +1,4 @@
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, cast
 import numpy as np
 import numpy.typing as npt
 import healpy as hp
@@ -75,12 +75,12 @@ class KingPDF:
         ndarray
             Normalized PDF value(s) with units of probability/steradian.
         """
-        # Scalar-like: check if we can shortcut using the angular cutoff
+        # Scalar-like: check if we can shortcut using the angular cutoff.
         if np.isscalar(x):
-            if x > self.angular_cutoff:
+            if x > self.angular_cutoff:  # type: ignore[operator]
                 return 0
-        elif (x.shape) == 1 and (len(x) == 1):
-            if x[0] > self.angular_cutoff:
+        elif isinstance(x, np.ndarray) and x.size == 1:
+            if float(x.flat[0]) > self.angular_cutoff:
                 return 0
 
         # Broadcast
@@ -124,12 +124,12 @@ class KingPDF:
         ndarray
             Normalized CDF value(s) (cumulative probability).
         """
-        # Scalar-like: check if we can shortcut using the angular cutoff
+        # Scalar-like: check if we can shortcut using the angular cutoff.
         if np.isscalar(x):
-            if x > self.angular_cutoff:
+            if x > self.angular_cutoff:  # type: ignore[operator]
                 return 1
-        elif len(x) == 1:
-            if x[0] > self.angular_cutoff:
+        elif isinstance(x, np.ndarray) and x.size == 1:
+            if float(x.flat[0]) > self.angular_cutoff:
                 return 1
 
         # Broadcast
@@ -193,7 +193,9 @@ class KingPDF:
             sindec_bins = np.unique(sindec_bins)
 
         # Mask unnecessary declination bins
-        pdf_check = self.pdf(np.abs(dec - np.arcsin(sindec_bins)), alpha, beta)
+        pdf_check = cast(
+            npt.NDArray[np.floating], self.pdf(np.abs(dec - np.arcsin(sindec_bins)), alpha, beta)
+        )
         decmask = pdf_check / pdf_check.max() > threshold
 
         # Generate a binning in RA from 0 to 2pi.
@@ -201,23 +203,23 @@ class KingPDF:
         ra_bins = np.linspace(0, 2 * np.pi, nbins)
 
         # Mask unnecessary RA bins
-        pdf_check = self.pdf(ra_bins, alpha, beta)
+        pdf_check = cast(npt.NDArray[np.floating], self.pdf(ra_bins, alpha, beta))
         ramask = pdf_check / pdf_check.max() > threshold
         ra_bins = ra_bins[ramask]
 
         # Calculate the PDF at each grid point
         ra_points, dec_points = meshgrid2d(ra_bins, np.arcsin(sindec_bins[decmask]))
         distance = angular_distance(0, dec, ra_points, dec_points)
-        pdf = self.pdf(distance, alpha, beta)
+        pdf_vals = cast(npt.NDArray[np.floating], self.pdf(distance, alpha, beta))
 
         # Integrate over RA using a simple trapezoid rule integration.
         # This should probably be checked for correct units. For example,
         # should this include a np.diff(sindec_bins) in the denominator?
         # I don't think it should, but someone should help check this.
         marginalized = np.zeros_like(sindec_bins)
-        marginalized[decmask] = ((pdf[:, :-1] + pdf[:, 1:]) / 2 * np.diff(ra_bins)[None, :]).sum(
-            axis=1
-        )
+        marginalized[decmask] = (
+            (pdf_vals[:, :-1] + pdf_vals[:, 1:]) / 2 * np.diff(ra_bins)[None, :]
+        ).sum(axis=1)
         return sindec_bins, marginalized
 
     def sample(
@@ -254,7 +256,7 @@ class KingPDF:
         if rng is None:
             rng = np.random.default_rng()
         psi_grid = np.linspace(1e-6, self.angular_cutoff, n_grid)
-        cdf_grid = self.cdf(psi_grid, alpha, beta)
+        cdf_grid = cast(npt.NDArray[np.floating], self.cdf(psi_grid, alpha, beta))
         return np.interp(rng.uniform(0, cdf_grid[-1], n), cdf_grid, psi_grid)
 
 
@@ -289,7 +291,10 @@ class InterpolatedKingPDF(KingPDF):
             np.log10(points_beta),
         )
         grid_alpha, grid_beta = np.meshgrid(self.points_alpha, self.points_beta)
-        self.log10_grid_norms = np.log10(_norm(grid_alpha, grid_beta, self.angular_cutoff).T)
+        norm_grid = cast(
+            npt.NDArray[np.floating], _norm(grid_alpha, grid_beta, self.angular_cutoff)
+        )
+        self.log10_grid_norms = np.log10(norm_grid.T)
 
     def norm(
         self,

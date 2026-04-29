@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union, cast
 import numpy.typing as npt
 
 from os.path import exists
@@ -66,6 +66,10 @@ class KingSpatialLikelihood:
         skymap: Union[npt.NDArray[np.floating], None] = None,
         cache_parameters: bool = True,
         cache_name: str = "./king_parameters_cache.npz",
+        weight_field: str = "ow",
+        true_ra_name: str = "trueRa",
+        true_dec_name: str = "trueDec",
+        true_energy_name: str = "trueE",
     ):
         # Store some of the configuration parameters for this instance.
         # Note that we don't need to store the signal events, dpsi_nbins,
@@ -86,7 +90,7 @@ class KingSpatialLikelihood:
         # run the fitter and potentially cache the results.
         fitted_parameters: Dict[str, npt.NDArray[np.floating]] = {}
         if cache_parameters and (cache_name is not None) and exists(cache_name):
-            fitted_parameters_npz = np.load(cache_name)
+            fitted_parameters_npz = np.load(cache_name, allow_pickle=True)
             for key in fitted_parameters_npz.files:
                 fitted_parameters[key] = fitted_parameters_npz[key]
         else:
@@ -97,13 +101,17 @@ class KingSpatialLikelihood:
                 minimum_counts=minimum_counts,
                 spectral_indices=spectral_indices,
                 angular_cutoff=angular_cutoff,
+                weight_field=weight_field,
+                true_ra_name=true_ra_name,
+                true_dec_name=true_dec_name,
+                true_energy_name=true_energy_name,
             )
             fitted_parameters = fitter.fit_all_bins(verbose=True)
             if cache_parameters and (cache_name is not None):
-                np.savez(cache_name, **fitted_parameters)
+                np.savez(cache_name, **fitted_parameters)  # type: ignore[arg-type]
 
         # Store the fitted parameters and bins for later interpolation during PDF evaluation.
-        self.parametrization_bins = fitted_parameters["parametrization_bins"]
+        self.parametrization_bins = fitted_parameters["parametrization_bins"]  # type: ignore[assignment]
         self.alpha_values = fitted_parameters["alpha"]
         self.beta_values = fitted_parameters["beta"]
 
@@ -198,6 +206,7 @@ class KingSpatialLikelihood:
             self.event_distances = angular_distance(
                 events["ra"], events["dec"], source_ras, source_decs
             )
+            assert source_ras is not None
             if (not self.multiple_source_warning_logged) and (len(source_ras) > 1):
                 logging.warning(
                     "Multiple source positions provided. This has not been tested and"
@@ -207,7 +216,7 @@ class KingSpatialLikelihood:
             for gamma in self.spectral_indices:
                 self.event_pvalue[gamma] = self.king_pdf.pdf(
                     self.event_distances, self.event_alpha[gamma], self.event_beta[gamma]
-                )
+                )  # type: ignore[assignment, arg-type]
         return
 
     def evaluate_pdf(self, events: npt.NDArray[Any], gamma: float = 2) -> npt.NDArray[np.floating]:
@@ -226,7 +235,7 @@ class KingSpatialLikelihood:
 
         if gamma in self.spectral_indices:
             # If the requested gamma is one of the fitted spectral indices, we can directly use those parameters.
-            return self.event_pvalue[gamma]
+            return cast(npt.NDArray[np.floating], self.event_pvalue[gamma])
         else:
             # Otherwise we have to interpolate the gamma values.
             pvalues = np.array([self.event_pvalue[g] for g in self.spectral_indices])
@@ -236,4 +245,4 @@ class KingSpatialLikelihood:
             t = (gamma - self.spectral_indices[idx]) / (
                 self.spectral_indices[idx + 1] - self.spectral_indices[idx]
             )
-            return (1 - t) * pvalues[idx] + t * pvalues[idx + 1]
+            return (1 - t) * pvalues[idx] + t * pvalues[idx + 1]  # type: ignore[no-any-return]

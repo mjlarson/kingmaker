@@ -145,7 +145,7 @@ def angular_distance(
         Angular separation(s) in radians.
     """
     cosDist = np.cos(src_ra - ra) * np.cos(src_dec) * np.cos(dec) + np.sin(src_dec) * np.sin(dec)
-    return np.arccos(cosDist)
+    return np.arccos(cosDist)  # type: ignore[no-any-return]
 
 
 @njit

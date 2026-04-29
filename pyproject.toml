@@ -9,7 +9,7 @@ readme = "README.md"
 authors= [ {name='Michael Larson', email='mlarson@icecube.wisc.edu'} ]
 dependencies = [
     'numpy>2',
-    'scipy',
+    'scipy>1.15',
     'numba',
     'matplotlib',
     'healpy',
