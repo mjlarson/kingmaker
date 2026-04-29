@@ -41,6 +41,7 @@ class KingSpatialLikelihood:
 
     # Have some place to cache the per-event information so we don't need to
     # recalculate it every time we evaluate the PDF.
+    events: Optional[Any] = None
     event_alpha: Dict[float, npt.NDArray[np.floating]]
     event_beta: Dict[float, npt.NDArray[np.floating]]
     event_distances: Union[npt.NDArray[np.floating], List[float]]
@@ -112,6 +113,10 @@ class KingSpatialLikelihood:
 
         # Store the fitted parameters and bins for later interpolation during PDF evaluation.
         self.parametrization_bins = fitted_parameters["parametrization_bins"]  # type: ignore[assignment]
+        try:
+            self.parametrization_bins.items()
+        except AttributeError:
+            self.parametrization_bins = self.parametrization_bins.item()
         self.alpha_values = fitted_parameters["alpha"]
         self.beta_values = fitted_parameters["beta"]
 
@@ -127,6 +132,16 @@ class KingSpatialLikelihood:
 
         return
 
+    def events_match(self, events: npt.NDArray[Any]):
+        try:
+            events_match = self.events == events
+            if isinstance(events_match, bool):
+                return events_match
+            else:
+                return all(events_match)
+        except ValueError:
+            return np.array_equal(self.events, events)
+
     def set_events(
         self,
         events: npt.NDArray[Any],
@@ -137,6 +152,9 @@ class KingSpatialLikelihood:
         the fitted parameters based on the event parameters and the provided binning. Then calculate the pvalues
         for each spectral index for each event and store them so we can interpolate them at runtime.
         """
+        if self.events_match(events):
+            return
+
         self.events = events
         self.source_ras = source_ras
         self.source_decs = source_decs
@@ -164,6 +182,7 @@ class KingSpatialLikelihood:
         # Extract the bin centers and keys for each event. The stored bins are
         # edges, but interpn requires coordinates matching the values shape.
         keys, bins = [], []
+
         for key, edges in self.parametrization_bins.items():
             keys.append(key)
             bins.append((edges[:-1] + edges[1:]) / 2)
@@ -175,10 +194,20 @@ class KingSpatialLikelihood:
         # each event in the given sample.
         for i, gamma in enumerate(self.spectral_indices):
             self.event_alpha[gamma] = interpn(
-                bins, self.alpha_values[i], event_param_values, bounds_error=False, fill_value=np.pi
+                bins,
+                self.alpha_values[i],
+                event_param_values,
+                bounds_error=False,
+                fill_value=None,
+                method="nearest",
             )
             self.event_beta[gamma] = interpn(
-                bins, self.beta_values[i], event_param_values, bounds_error=False, fill_value=100
+                bins,
+                self.beta_values[i],
+                event_param_values,
+                bounds_error=False,
+                fill_value=None,
+                method="nearest",
             )
 
         # Start calculating the pvalues.
@@ -227,7 +256,7 @@ class KingSpatialLikelihood:
                 " for this trial and source locations before evaluating the PDF."
             )
 
-        if not np.array_equal(self.events, events):
+        if not self.events_match(events):
             raise RuntimeError(
                 "The events provided to evaluate_pdf do not match the events that were used to calculate the per-event parameters."
                 " Please ensure that you call set_events with the same events that you later pass into evaluate_pdf."
