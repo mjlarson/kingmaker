@@ -40,7 +40,6 @@ def _interp1d(x: float, xlow: float, xhigh: float, ylow: float, yhigh: float) ->
     ],
     "(),(),(n),(m),(n,m)->()",
     cache=True,
-    target="parallel",
 )
 def _interp2d(x, y, xp, yp, z, result):
     """

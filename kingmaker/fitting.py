@@ -417,8 +417,6 @@ class KingPSFFitter:
             self.fit_beta[param_idx] = best_params[1]
             self.fit_quality[param_idx] = best_chi2
 
-            print(f"Best fit: {best_params}")
-
             # Store histogram data (pad/truncate to match storage size)
             n_store = min(len(hist), self.dpsi_nbins)
             self.histograms[param_idx][:n_store] = hist[:n_store]
