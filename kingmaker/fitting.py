@@ -32,6 +32,15 @@ class KingPSFFitter:
         Number of bins in angular error (dpsi) for fitting. Default is 101.
     minimum_counts : int, optional
         Minimum number of events required in a bin for fitting. Default is 100.
+    remove_weight_outliers : bool
+        If True, remove events with weights beyond the bounds of weight_outlier_percentiles
+        (calculated per parametrization bin) from the fit. Used to stabilize fits by removing
+        weighting outliers. Default is True.
+    weight_outlier_percentiles : list, optional
+        The percentiles (ranging from 0-100) defining the range of weights to accept
+        for the per-parametrization bin histogramming and fitting. Note that these are
+        applied based on the weights based on sorted index value and not cumulative
+        weight value like np.percentile. Default is [0, 95],
     weight_field : str, optional
         Field name for oneweight. If None, equal weights are used.
     true_ra_name : str
@@ -67,6 +76,8 @@ class KingPSFFitter:
         parametrization_bins: Dict[str, Union[int, List, Tuple, npt.NDArray]],
         dpsi_nbins: int = 101,
         minimum_counts: int = 100,
+        remove_weight_outliers=True,
+        weight_outlier_percentiles=[0, 95],
         weight_field: Optional[str] = "ow",
         true_ra_name: str = "trueRa",
         true_dec_name: str = "trueDec",
@@ -76,6 +87,9 @@ class KingPSFFitter:
     ) -> None:
         """Initialize the KingPSFFitter."""
         self.signal_events = signal_events
+        self.remove_weight_outliers = remove_weight_outliers
+        self.weight_outlier_percentiles = weight_outlier_percentiles
+
         self.weight_field = weight_field
         self.true_ra_name = true_ra_name
         self.true_dec_name = true_dec_name
@@ -299,6 +313,15 @@ class KingPSFFitter:
                     # bin_indices are 0-based, but digitize returns 1-based
                     mask &= self.event_indices[key] == bin_indices[i] + 1
 
+                if self.remove_weight_outliers:
+                    masked_weights = weights[mask]
+                    idx_range = [
+                        int(len(masked_weights) * self.weight_outlier_percentiles[0] / 100),
+                        int(len(masked_weights) * self.weight_outlier_percentiles[1] / 100),
+                    ]
+                    idx = np.digitize(masked_weights, np.unique(masked_weights))
+                    mask[mask] &= (idx_range[0] <= idx) & (idx <= idx_range[1])
+
                 n_events = mask.sum()
                 param_idx = tuple([g_idx] + list(bin_indices))
                 self.event_counts[param_idx] = n_events
@@ -379,12 +402,13 @@ class KingPSFFitter:
         alpha_guess = bin_centers[np.argmax(hist)]
 
         # Normalize by bin width to get density
-        delta = 2 * np.pi * np.diff(np.cos(dpsi_bins))
+        delta = -2 * np.pi * np.diff(np.cos(dpsi_bins))
         with np.errstate(divide="ignore", invalid="ignore"):
             hist = hist / delta
             hist2 = hist2 / delta**2
 
         # Try multiple starting points to find best fit
+        best_chi2 = np.inf
         best_params = None
 
         test_alphas = alpha_guess * np.array([0.5, 0.75, 1.0, 1.25, 1.5])
@@ -393,19 +417,22 @@ class KingPSFFitter:
         for alpha_0 in test_alphas:
             # Keep track of the best value for each alpha so we can
             # quit early if we start climbing out of the minimum.
-            best_chi2 = np.inf
+            alpha_best_chi2 = np.inf
             for beta_0 in test_betas:
                 try:
                     params, chi2 = self._fit_histogram(
                         hist, bin_centers, hist2, alpha_guess=alpha_0, beta_guess=beta_0
                     )
 
-                    if chi2 < best_chi2:
-                        best_chi2 = chi2
-                        best_params = params
+                    if chi2 < alpha_best_chi2:
+                        alpha_best_chi2 = chi2
+
+                        if alpha_best_chi2 < best_chi2:
+                            best_chi2 = alpha_best_chi2
+                            best_params = params
 
                     # Early stopping if we're climbing out of minimum
-                    if chi2 > best_chi2 * 1.5:
+                    if chi2 > alpha_best_chi2 * 1.5:
                         break
 
                 except (ValueError, RuntimeError):
@@ -415,7 +442,7 @@ class KingPSFFitter:
         if best_params is not None:
             self.fit_alpha[param_idx] = best_params[0]
             self.fit_beta[param_idx] = best_params[1]
-            self.fit_quality[param_idx] = best_chi2
+            self.fit_quality[param_idx] = best_chi2 / self.dpsi_nbins
 
             # Store histogram data (pad/truncate to match storage size)
             n_store = min(len(hist), self.dpsi_nbins)
@@ -472,8 +499,8 @@ class KingPSFFitter:
         initial_guess = [alpha_guess, beta_guess]
 
         # Set reasonable bounds
-        alpha_min = max(1e-4, alpha_guess / 10)
-        alpha_max = min(np.pi, alpha_guess * 10)
+        alpha_min = max(1e-8, alpha_guess / 2)
+        alpha_max = min(np.pi, alpha_guess * 2)
         beta_min = 1.0
         beta_max = 100.0
 
