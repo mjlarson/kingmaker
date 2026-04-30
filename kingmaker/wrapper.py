@@ -1,15 +1,14 @@
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy.typing as npt
 
 from os.path import exists
 import logging
 import numpy as np
 import healpy as hp
-from scipy.interpolate import interpn
 
 from .pdf import InterpolatedKingPDF, TemplateSmearedKingPDF
 from .fitting import KingPSFFitter
-from .utils import angular_distance
+from .utils import angular_distance, _interp1d
 
 
 class KingSpatialLikelihood:
@@ -117,6 +116,15 @@ class KingSpatialLikelihood:
             self.parametrization_bins.items()
         except AttributeError:
             self.parametrization_bins = self.parametrization_bins.item()
+
+        # Extract the bin centers and keys for each event. The stored bins are
+        # edges, but interpn requires coordinates matching the values shape.
+        self.keys, self.bin_centers = [], []
+        for key, edges in self.parametrization_bins.items():
+            self.keys.append(key)
+            self.bin_centers.append((edges[:-1] + edges[1:]) / 2)
+
+        # And grab the fitted alpha/beta arrays
         self.alpha_values = fitted_parameters["alpha"]
         self.beta_values = fitted_parameters["beta"]
 
@@ -133,14 +141,11 @@ class KingSpatialLikelihood:
         return
 
     def events_match(self, events: npt.NDArray[Any]):
-        try:
-            events_match = self.events == events
-            if isinstance(events_match, bool):
-                return events_match
-            else:
-                return all(events_match)
-        except ValueError:
-            return np.array_equal(self.events, events)
+        if self.events is None:
+            return False
+        return np.array_equal(self.events["ra"], events["ra"]) and np.array_equal(
+            self.events["dec"], events["dec"]
+        )
 
     def set_events(
         self,
@@ -178,37 +183,16 @@ class KingSpatialLikelihood:
                 "that these arrays have the same length when passing into set_events."
             )
 
-        # Begin by finding the per-event alpha and beta values via interpolation.
-        # Extract the bin centers and keys for each event. The stored bins are
-        # edges, but interpn requires coordinates matching the values shape.
-        keys, bins = [], []
-
-        for key, edges in self.parametrization_bins.items():
-            keys.append(key)
-            bins.append((edges[:-1] + edges[1:]) / 2)
-
-        # Get the event parameter values for each parameter
-        event_param_values = np.array([events[key] for key in keys]).T
-
         # Interpolate to get the alpha and beta values for each spectral index for
         # each event in the given sample.
+        def index(centers, values):
+            i = np.searchsorted(centers, values).clip(1, len(centers) - 1)
+            return np.where(values - centers[i - 1] < centers[i] - values, i - 1, i)
+
+        event_indices = [index(self.bin_centers[i], events[key]) for i, key in enumerate(self.keys)]
         for i, gamma in enumerate(self.spectral_indices):
-            self.event_alpha[gamma] = interpn(
-                bins,
-                self.alpha_values[i],
-                event_param_values,
-                bounds_error=False,
-                fill_value=None,
-                method="nearest",
-            )
-            self.event_beta[gamma] = interpn(
-                bins,
-                self.beta_values[i],
-                event_param_values,
-                bounds_error=False,
-                fill_value=None,
-                method="nearest",
-            )
+            self.event_alpha[gamma] = self.alpha_values[i][*event_indices]
+            self.event_beta[gamma] = self.beta_values[i][*event_indices]
 
         # Start calculating the pvalues.
         # TODO: By assuming keys "ra" and "dec" exist and are usable here, we're
@@ -262,16 +246,17 @@ class KingSpatialLikelihood:
                 " Please ensure that you call set_events with the same events that you later pass into evaluate_pdf."
             )
 
-        if gamma in self.spectral_indices:
-            # If the requested gamma is one of the fitted spectral indices, we can directly use those parameters.
-            return cast(npt.NDArray[np.floating], self.event_pvalue[gamma])
-        else:
-            # Otherwise we have to interpolate the gamma values.
-            pvalues = np.array([self.event_pvalue[g] for g in self.spectral_indices])
-            idx = np.clip(
-                np.searchsorted(self.spectral_indices, gamma) - 1, 0, len(self.spectral_indices) - 2
-            )
-            t = (gamma - self.spectral_indices[idx]) / (
-                self.spectral_indices[idx + 1] - self.spectral_indices[idx]
-            )
-            return (1 - t) * pvalues[idx] + t * pvalues[idx + 1]  # type: ignore[no-any-return]
+        # Interpolate over gamma to get the final result for each event
+        idx = np.clip(
+            np.searchsorted(self.spectral_indices, gamma) - 1, 0, len(self.spectral_indices) - 2
+        )
+
+        gamma_low, gamma_high = self.spectral_indices[idx], self.spectral_indices[idx + 1]
+        result = _interp1d(
+            gamma,
+            gamma_low,
+            gamma_high,
+            self.event_pvalue[gamma_low],
+            self.event_pvalue[gamma_high],
+        )
+        return result
