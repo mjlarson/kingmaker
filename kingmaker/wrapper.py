@@ -87,7 +87,10 @@ class KingSpatialLikelihood:
 
         # Obtain the King distribution parameters for all bins. If we're caching parameters
         # and a cache file exists, load from the cache instead of fitting. Otherwise,
-        # run the fitter and potentially cache the results.
+        # run the fitter and potentially cache the results. Note that if we run the fitter,
+        # we explicitly set the angular cutoff to pi: this is to ensure that we allow the
+        # full histogram to be fit for each bin without artificially setting the PDF to 0
+        # for some bins.
         fitted_parameters: Dict[str, npt.NDArray[np.floating]] = {}
         if cache_parameters and (cache_name is not None) and exists(cache_name):
             fitted_parameters_npz = np.load(cache_name, allow_pickle=True)
@@ -100,7 +103,7 @@ class KingSpatialLikelihood:
                 dpsi_nbins=dpsi_nbins,
                 minimum_counts=minimum_counts,
                 spectral_indices=spectral_indices,
-                angular_cutoff=angular_cutoff,
+                angular_cutoff=np.pi,
                 weight_field=weight_field,
                 true_ra_name=true_ra_name,
                 true_dec_name=true_dec_name,
