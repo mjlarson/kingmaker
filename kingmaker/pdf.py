@@ -83,6 +83,11 @@ class KingPDF:
             if float(x.flat[0]) > self.angular_cutoff:
                 return 0
 
+        if np.any(alpha <= 0):
+            raise ValueError("Received alpha <= 0. The PDF is not defined here.")
+        if np.any(beta <= 1):
+            raise ValueError("Received beta <= 1. The PDF is not defined here.")
+
         # Broadcast
         x, alpha, beta = np.broadcast_arrays(x, alpha, beta)
 
@@ -131,6 +136,11 @@ class KingPDF:
         elif isinstance(x, np.ndarray) and x.size == 1:
             if float(x.flat[0]) > self.angular_cutoff:
                 return 1
+
+        if np.any(alpha <= 0):
+            raise ValueError("Received alpha <= 0. The PDF is not defined here.")
+        if np.any(beta <= 1):
+            raise ValueError("Received beta <= 1. The PDF is not defined here.")
 
         # Broadcast
         x, alpha, beta = np.broadcast_arrays(x, alpha, beta)
@@ -181,6 +191,11 @@ class KingPDF:
         marginalized : ndarray
             Marginalized PDF values at each bin.
         """
+        if np.any(alpha <= 0):
+            raise ValueError("Received alpha <= 0. The PDF is not defined here.")
+        if np.any(beta <= 1):
+            raise ValueError("Received beta <= 1. The PDF is not defined here.")
+
         # Generate the sindec binning
         sindec = np.sin(dec)
         if nbins is None:
@@ -253,6 +268,12 @@ class KingPDF:
         ndarray
             Angular separations in radians, shape (n,).
         """
+
+        if np.any(alpha <= 0):
+            raise ValueError("Received alpha <= 0. The PDF is not defined here.")
+        if np.any(beta <= 1):
+            raise ValueError("Received beta <= 1. The PDF is not defined here.")
+
         if rng is None:
             rng = np.random.default_rng()
         psi_grid = np.linspace(1e-6, self.angular_cutoff, n_grid)
@@ -326,14 +347,22 @@ class TemplateSmearedKingPDF(KingPDF):
 
         super().__init__(angular_cutoff=angular_cutoff)
 
+        if np.any(points_alpha <= 0):
+            raise ValueError(
+                "Received points_alpha containing at least one point <= 0. The"
+                " KingPDF isn't defined in this region. Ensure your points are"
+                " all above 0.0 when passing them into TemplateSmearedKingPDF."
+            )
         if np.any(points_beta <= 1):
             raise ValueError(
                 "Received points_beta containing at least one point <= 1. The"
                 " KingPDF isn't defined in this region. Ensure your points are"
                 " all above 1.0 when passing them into TemplateSmearedKingPDF."
             )
-        self.points_alpha = (points_alpha,)
-        self.points_beta = (points_beta,)
+        self.points_alpha = points_alpha
+        self.points_beta = points_beta
+        self.log10_points_alpha = np.log10(self.points_alpha)
+        self.log10_points_beta = np.log10(self.points_beta)
 
         self.nside = hp.npix2nside(len(skymap))
         self.lmax = (3 * self.nside - 1) if lmax is None else lmax
@@ -522,6 +551,18 @@ class TemplateSmearedKingPDF(KingPDF):
         ndarray
             Spherical harmonic coefficients b_l for degrees 0 to lmax.
         """
+        if np.any(alpha <= 0):
+            raise ValueError(
+                "Received alpha containing at least one point <= 0. The"
+                " KingPDF isn't defined in this region. Ensure your points are"
+                " all above 0.0 when passing them into TemplateSmearedKingPDF."
+            )
+        if np.any(beta <= 1):
+            raise ValueError(
+                "Received beta containing at least one point <= 1. The"
+                " KingPDF isn't defined in this region. Ensure your points are"
+                " all above 1.0 when passing them into TemplateSmearedKingPDF."
+            )
         log_a = np.log10(alpha)
         log_b = np.log10(beta)
         if self.interpolation_method == "nearest":
@@ -564,6 +605,18 @@ class TemplateSmearedKingPDF(KingPDF):
         ndarray
             Convolved HEALPix skymap at the same resolution as input.
         """
+        if np.any(alpha <= 0):
+            raise ValueError(
+                "Received alpha containing at least one point <= 0. The"
+                " KingPDF isn't defined in this region. Ensure your points are"
+                " all above 0.0 when passing them into TemplateSmearedKingPDF."
+            )
+        if np.any(beta <= 1):
+            raise ValueError(
+                "Received beta containing at least one point <= 1. The"
+                " KingPDF isn't defined in this region. Ensure your points are"
+                " all above 1.0 when passing them into TemplateSmearedKingPDF."
+            )
         b_l = self.get_king_b_l(alpha, beta)
         harmonic_convolution = hp.almxfl(alm=self.skymap_alm, fl=b_l, mmax=self.mmax, inplace=False)
         return hp.alm2map(harmonic_convolution, nside=self.nside, lmax=self.lmax, mmax=self.mmax)
@@ -589,6 +642,18 @@ class TemplateSmearedKingPDF(KingPDF):
         float or ndarray
             Convolved PDF value(s) at evaluation coordinates.
         """
+        if np.any(alpha <= 0):
+            raise ValueError(
+                "Received alpha containing at least one point <= 0. The"
+                " KingPDF isn't defined in this region. Ensure your points are"
+                " all above 0.0 when passing them into TemplateSmearedKingPDF."
+            )
+        if np.any(beta <= 1):
+            raise ValueError(
+                "Received beta containing at least one point <= 1. The"
+                " KingPDF isn't defined in this region. Ensure your points are"
+                " all above 1.0 when passing them into TemplateSmearedKingPDF."
+            )
         b_l = self.get_king_b_l(alpha, beta)
         return b_l @ self._c_l
 
@@ -648,6 +713,19 @@ class TemplateSmearedKingPDF(KingPDF):
         Samples land at HEALPix pixel centres. The positional resolution is
         therefore limited by the skymap pixelisation (~`hp.nside2resol(nside)`).
         """
+        if np.any(alpha <= 0):
+            raise ValueError(
+                "Received alpha containing at least one point <= 0. The"
+                " KingPDF isn't defined in this region. Ensure your points are"
+                " all above 0.0 when passing them into TemplateSmearedKingPDF."
+            )
+        if np.any(beta <= 1):
+            raise ValueError(
+                "Received beta containing at least one point <= 1. The"
+                " KingPDF isn't defined in this region. Ensure your points are"
+                " all above 1.0 when passing them into TemplateSmearedKingPDF."
+            )
+
         if rng is None:
             rng = np.random.default_rng()
 

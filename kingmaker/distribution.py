@@ -64,8 +64,6 @@ def _unnormalized_cdf(
     float
         Unnormalized partial integral ∫₀ˣ f(θ) · 2π · sin θ dθ.
     """
-    if (alpha == 0) or (beta <= 1):
-        return np.inf
     alpha2beta = alpha**2 * beta
     prefactor = 2 * np.pi * alpha2beta / (beta - 1)
     normalized_cdf = 1 - (1 + (1 - np.cos(x)) / alpha2beta) ** (1 - beta)
