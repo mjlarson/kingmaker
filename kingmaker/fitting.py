@@ -1,7 +1,7 @@
 from typing import Any, Dict, List, Optional, Tuple, Union, cast
 import numpy as np
 import numpy.typing as npt
-from scipy.optimize import least_squares
+from scipy.optimize import minimize
 
 from .pdf import InterpolatedKingPDF
 from .utils import angular_distance
@@ -355,6 +355,11 @@ class KingPSFFitter:
             "parametrization_bins": self.parametrization_bins,  # type: ignore[dict-item]
         }
 
+    def _cdf_chi2(self, cdf_hist, cdf_variance, bin_centers, alpha, beta):
+        expected = self.king_pdf.cdf(bin_centers, alpha, beta)
+        val = (cdf_hist - expected) ** 2 / (cdf_variance + 1e-6)
+        return val.sum() / len(bin_centers)
+
     def _fit_single_bin(
         self,
         mask: npt.NDArray[np.bool_],
@@ -383,9 +388,13 @@ class KingPSFFitter:
         masked_weights = weights[mask]
         masked_weights /= masked_weights.sum()  # Normalize
 
-        # Create bins for this subset
+        # Create bins for this subset. Also calculate the
+        # phase space parameter while we're here. We'll need
+        # it in order to store the histograms as PDFs later.
         dpsi_bins = self._get_percentile_bins(self.dpsi_nbins, masked_dpsi, masked_weights)
         dpsi_bins = np.unique(dpsi_bins)
+        delta = -2 * np.pi * np.diff(np.cos(dpsi_bins))
+        self.dpsi_bins[param_idx][: len(dpsi_bins)] = dpsi_bins
 
         # If we don't have enough bins, skip
         if len(dpsi_bins) < 3:
@@ -397,118 +406,71 @@ class KingPSFFitter:
         hist, _ = np.histogram(masked_dpsi, bins=dpsi_bins, weights=masked_weights)
         hist2, _ = np.histogram(masked_dpsi, bins=dpsi_bins, weights=masked_weights**2)
 
-        # Get initial guess from peak location. Do
-        # this before scaling to get the density.
-        alpha_guess = bin_centers[np.argmax(hist)]
+        cdf_hist = np.cumsum(hist)
+        cdf_variance = np.cumsum(hist2) / np.sum(hist) ** 2
 
-        # Normalize by bin width to get density
-        delta = -2 * np.pi * np.diff(np.cos(dpsi_bins))
-        with np.errstate(divide="ignore", invalid="ignore"):
-            hist = hist / delta
-            hist2 = hist2 / delta**2
-
-        # Try multiple starting points to find best fit
+        # Get initial guess from peak location.
+        best_params = []
         best_chi2 = np.inf
-        best_params = None
+        for beta in [1.25, 1.75, 2, 2.5, 4, 7, 10]:
+            alpha_guess = bin_centers[np.argmax(hist)]
+            seed = [alpha_guess, beta]
+            result = minimize(
+                lambda params: self._cdf_chi2(cdf_hist, cdf_variance, bin_centers, *params),
+                seed,
+                method="L-BFGS-B",
+                jac="3-point",
+                tol=1e-4,
+                bounds=[
+                    (self.king_pdf.points_alpha[0], self.king_pdf.points_alpha[-1]),
+                    (self.king_pdf.points_beta[0], self.king_pdf.points_beta[-1]),
+                ],
+            )
+            print(f"... {beta} - {result.x} - {result.fun}")
+            if best_chi2 > result.fun:
+                best_params, best_chi2 = result.x, result.fun
 
-        test_alphas = alpha_guess * np.array([0.5, 0.75, 1.0, 1.25, 1.5])
-        test_betas = np.array([1.5, 2.0, 2.5, 3.0, 4.0])
-
-        for alpha_0 in test_alphas:
-            # Keep track of the best value for each alpha so we can
-            # quit early if we start climbing out of the minimum.
-            alpha_best_chi2 = np.inf
-            for beta_0 in test_betas:
-                try:
-                    params, chi2 = self._fit_histogram(
-                        hist, bin_centers, hist2, alpha_guess=alpha_0, beta_guess=beta_0
-                    )
-
-                    if chi2 < alpha_best_chi2:
-                        alpha_best_chi2 = chi2
-
-                        if alpha_best_chi2 < best_chi2:
-                            best_chi2 = alpha_best_chi2
-                            best_params = params
-
-                    # Early stopping if we're climbing out of minimum
-                    if chi2 > alpha_best_chi2 * 1.5:
-                        break
-
-                except (ValueError, RuntimeError):
-                    continue
+            # Once we get a good reduced chi2, we can escape.
+            if best_chi2 < 1:
+                break
 
         # Store results if we found a solution
         if best_params is not None:
             self.fit_alpha[param_idx] = best_params[0]
             self.fit_beta[param_idx] = best_params[1]
-            self.fit_quality[param_idx] = best_chi2 / self.dpsi_nbins
+            self.fit_quality[param_idx] = best_chi2
 
-            # Store histogram data (pad/truncate to match storage size)
+            print("reduce chi2", best_chi2, "idx", param_idx)
+            """if best_chi2 > 20:
+                print("Best fit values:", best_params)
+                import matplotlib.pyplot as plt
+                expected = self.king_pdf.pdf(bin_centers, *best_params)
+                expected *= (hist/delta).sum() / expected.sum()
+                fig, ax = plt.subplots()
+                ax.hist(dpsi_bins[:-1], bins=dpsi_bins, weights=hist/delta, histtype='step', label='obs')
+                ax.scatter(bin_centers, expected, label='best fit')
+                ax.set_xscale('log')
+                ax.set_yscale('log')
+                plt.show()
+
+                fig, ax = plt.subplots()
+                expected = self.king_pdf.cdf(bin_centers, *best_params)
+                ax.hist(dpsi_bins[:-1], bins=dpsi_bins, weights=np.cumsum(hist), histtype='step', label='obs')
+                ax.scatter(bin_centers, expected, label='best fit cdf')
+                ax.set_xscale('log')
+                plt.show()
+            """
+
+            # Store histogram data (pad/truncate to match storage size).
+            # Make sure to rescale by the phase space to get densities.
             n_store = min(len(hist), self.dpsi_nbins)
-            self.histograms[param_idx][:n_store] = hist[:n_store]
-            self.uncertainties[param_idx][:n_store] = np.sqrt(hist2[:n_store])
+            self.histograms[param_idx][:n_store] = hist[:n_store] / delta
+            self.uncertainties[param_idx][:n_store] = np.sqrt(hist2[:n_store]) / delta
             self.dpsi_bins[param_idx][: len(dpsi_bins)] = dpsi_bins
 
             return True
 
         return False
-
-    def _fit_histogram(
-        self,
-        hist_vals: npt.NDArray[np.floating],
-        bin_centers: npt.NDArray[np.floating],
-        err2: npt.NDArray[np.floating],
-        alpha_guess: float,
-        beta_guess: float,
-    ) -> Tuple[npt.NDArray[np.floating], float]:
-        """
-        Fit King PDF to a histogram using least squares.
-
-        Parameters
-        ----------
-        hist_vals : ndarray
-            Histogram values (density).
-        bin_centers : ndarray
-            Bin center positions.
-        err2 : ndarray
-            Squared uncertainties on histogram values.
-        alpha_guess : float
-            Initial guess for alpha parameter.
-        beta_guess : float
-            Initial guess for beta parameter.
-
-        Returns
-        -------
-        params : ndarray
-            Fitted parameters [alpha, beta].
-        chi2 : float
-            Chi-square value of the fit.
-        """
-
-        def residuals(params):
-            alpha, beta = params
-            # Evaluate King PDF at bin centers
-            expected = self.king_pdf.pdf(bin_centers, alpha, beta)
-            # Normalize to match histogram integral
-            expected *= hist_vals.sum() / expected.sum()
-            # Compute chi-square residuals
-            res = (hist_vals - expected) ** 2 / (err2 + 1e-6)
-            return res
-
-        initial_guess = [alpha_guess, beta_guess]
-
-        # Set reasonable bounds
-        alpha_min = max(1e-8, alpha_guess / 2)
-        alpha_max = min(np.pi, alpha_guess * 2)
-        beta_min = 1.0
-        beta_max = 100.0
-
-        result = least_squares(
-            residuals, initial_guess, bounds=([alpha_min, beta_min], [alpha_max, beta_max])
-        )
-
-        return result.x, np.sum(result.fun)
 
     def get_interpolator(self, gamma_index: int = 0) -> Tuple[Any, Any]:
         """
