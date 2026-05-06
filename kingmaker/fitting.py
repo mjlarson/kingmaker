@@ -1,9 +1,10 @@
 from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from tqdm import tqdm
 import numpy as np
 import numpy.typing as npt
 from scipy.optimize import minimize
 
-from .pdf import InterpolatedKingPDF
+from .pdf import KingPDF
 from .utils import angular_distance
 
 
@@ -102,7 +103,7 @@ class KingPSFFitter:
         self.angular_cutoff = angular_cutoff
 
         # Initialize King PDF
-        self.king_pdf = InterpolatedKingPDF(angular_cutoff=angular_cutoff)
+        self.king_pdf = KingPDF(angular_cutoff=angular_cutoff)
 
         # Validate and setup binning
         self._validate_fields(parametrization_bins)
@@ -306,7 +307,8 @@ class KingPSFFitter:
             n_fitted = 0
             n_skipped = 0
 
-            for bin_indices in np.ndindex(*self.parametrization_shape):
+            total_bins = np.prod(self.parametrization_shape)
+            for bin_indices in tqdm(np.ndindex(*self.parametrization_shape), total=total_bins):
                 # Create mask for events in this bin
                 mask = np.ones(len(weights), dtype=bool)
                 for i, key in enumerate(self.bin_names):
@@ -355,10 +357,13 @@ class KingPSFFitter:
             "parametrization_bins": self.parametrization_bins,  # type: ignore[dict-item]
         }
 
-    def _cdf_chi2(self, cdf_hist, cdf_variance, bin_centers, alpha, beta):
-        expected = self.king_pdf.cdf(bin_centers, alpha, beta)
-        val = (cdf_hist - expected) ** 2 / (cdf_variance + 1e-6)
-        return val.sum() / len(bin_centers)
+    def _cdf_chi2(self, cdf_hist, cdf_variance, bins, alpha, beta):
+        expected = self.king_pdf.cdf(bins[1:], alpha, beta)
+        expected *= cdf_hist.max() / expected.max()
+        val = (cdf_hist - expected) ** 2 / np.nextafter(cdf_variance, np.inf)
+        if np.any(~np.isfinite(val)):
+            val[:] = 100000
+        return val.sum() / len(bins)
 
     def _fit_single_bin(
         self,
@@ -410,29 +415,24 @@ class KingPSFFitter:
         cdf_variance = np.cumsum(hist2) / np.sum(hist) ** 2
 
         # Get initial guess from peak location.
-        best_params = []
+        # alpha_guess = bin_centers[np.argmax(hist)]
+        alpha_guess = bin_centers[np.searchsorted(cdf_hist, 0.5)]
+        best_params = [np.inf, np.inf]
         best_chi2 = np.inf
-        for beta in [1.25, 1.75, 2, 2.5, 4, 7, 10]:
-            alpha_guess = bin_centers[np.argmax(hist)]
-            seed = [alpha_guess, beta]
+        for beta in [1.25, 1.75, 2, 2.5, 4, 7, 9]:
             result = minimize(
-                lambda params: self._cdf_chi2(cdf_hist, cdf_variance, bin_centers, *params),
-                seed,
+                lambda params: self._cdf_chi2(cdf_hist, cdf_variance, dpsi_bins, *params),
+                [alpha_guess, beta],
                 method="L-BFGS-B",
                 jac="3-point",
-                tol=1e-4,
                 bounds=[
-                    (self.king_pdf.points_alpha[0], self.king_pdf.points_alpha[-1]),
-                    (self.king_pdf.points_beta[0], self.king_pdf.points_beta[-1]),
+                    (np.nextafter(0, np.pi), np.nextafter(self.angular_cutoff, 0)),
+                    (np.nextafter(1, 2), np.nextafter(1000, 1)),
                 ],
             )
-            print(f"... {beta} - {result.x} - {result.fun}")
-            if best_chi2 > result.fun:
-                best_params, best_chi2 = result.x, result.fun
 
-            # Once we get a good reduced chi2, we can escape.
-            if best_chi2 < 1:
-                break
+            if result.success and (best_chi2 > result.fun):
+                best_params, best_chi2 = result.x, result.fun
 
         # Store results if we found a solution
         if best_params is not None:
@@ -440,8 +440,9 @@ class KingPSFFitter:
             self.fit_beta[param_idx] = best_params[1]
             self.fit_quality[param_idx] = best_chi2
 
+            """
             print("reduce chi2", best_chi2, "idx", param_idx)
-            """if best_chi2 > 20:
+            if best_chi2 > 20:
                 print("Best fit values:", best_params)
                 import matplotlib.pyplot as plt
                 expected = self.king_pdf.pdf(bin_centers, *best_params)

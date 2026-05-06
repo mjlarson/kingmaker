@@ -6,7 +6,7 @@ import logging
 import numpy as np
 import healpy as hp
 
-from .pdf import InterpolatedKingPDF, TemplateSmearedKingPDF
+from .pdf import KingPDF, TemplateSmearedKingPDF
 from .fitting import KingPSFFitter
 from .utils import angular_distance, _interp1d
 
@@ -32,9 +32,9 @@ class KingSpatialLikelihood:
     cache_name: str = "king_parameters_cache.npz"
 
     # Store an instance of the PDF class to use for evaluations. This will be
-    # either a InterpolatedKingPDF (point source) or a TemplateSmearedKingPDF
+    # either a KingPDF (point source) or a TemplateSmearedKingPDF
     # (extended source with skymap).
-    king_pdf: InterpolatedKingPDF
+    king_pdf: KingPDF
     template_pdf: TemplateSmearedKingPDF
     nside: int
 
@@ -136,14 +136,14 @@ class KingSpatialLikelihood:
         self.beta_values = fitted_parameters["beta"]
 
         # Instantiate the PDF object. If we have a template, use the template-smoothed
-        # PDF; otherwise, use the standard interpolated PDF.
+        # PDF; otherwise, use the standard PDF.
         if self.skymap is not None:
             self.nside = hp.npix2nside(len(self.skymap))
             self.template_pdf = TemplateSmearedKingPDF(
                 skymap=self.skymap, angular_cutoff=angular_cutoff
             )
         else:
-            self.king_pdf = InterpolatedKingPDF(angular_cutoff=angular_cutoff)
+            self.king_pdf = KingPDF(angular_cutoff=angular_cutoff)
 
         return
 
