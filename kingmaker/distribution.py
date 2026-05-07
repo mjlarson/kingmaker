@@ -6,7 +6,11 @@ from numba import vectorize, float32, float64
 _log10pi: float = np.log10(np.pi)
 
 
-@vectorize([float32(float32, float32, float32), float64(float64, float64, float64)], target="cpu")
+@vectorize(
+    [float32(float32, float32, float32), float64(float64, float64, float64)],
+    target="cpu",
+    cache=True,
+)
 def _unnormalized_pdf(
     x: Union[float, npt.NDArray[np.floating]],
     alpha: Union[float, npt.NDArray[np.floating]],
@@ -38,8 +42,11 @@ def _unnormalized_pdf(
     return (1 + (1 - np.cos(x)) / (alpha**2 * beta)) ** -beta
 
 
-@vectorize  # ([float32(float32,float32,float32), float64(float64,float64,float64)],
-# target='cpu')
+@vectorize(
+    [float32(float32, float32, float32), float64(float64, float64, float64)],
+    target="cpu",
+    cache=True,
+)
 def _unnormalized_cdf(
     x: Union[float, npt.NDArray[np.floating]], alpha: float, beta: float
 ) -> Union[float, npt.NDArray[np.floating]]:
@@ -65,12 +72,16 @@ def _unnormalized_cdf(
         Unnormalized partial integral ∫₀ˣ f(θ) · 2π · sin θ dθ.
     """
     alpha2beta = alpha**2 * beta
-    prefactor = 2 * np.pi * alpha2beta / (beta - 1)
-    normalized_cdf = 1 - (1 + (1 - np.cos(x)) / alpha2beta) ** (1 - beta)
-    return prefactor * normalized_cdf
+    return (2 * np.pi * alpha2beta / (beta - 1)) * (
+        1 - (1 + (1 - np.cos(x)) / alpha2beta) ** (1 - beta)
+    )
 
 
-@vectorize
+@vectorize(
+    [float32(float32, float32, float32), float64(float64, float64, float64)],
+    target="cpu",
+    cache=True,
+)
 def _norm(
     alpha: Union[float, npt.NDArray[np.floating]],
     beta: Union[float, npt.NDArray[np.floating]],
@@ -97,4 +108,7 @@ def _norm(
     ndarray
         Normalization constants such that PDF integrates to 1 over the sphere.
     """
-    return 1.0 / _unnormalized_cdf(maximum, alpha, beta)  # type: ignore[no-any-return]
+    alpha2beta = alpha**2 * beta
+    return (beta - 1) / (
+        2 * np.pi * alpha2beta * (1 - (1 + (1 - np.cos(maximum)) / alpha2beta) ** (1 - beta))
+    )  # type: ignore[no-any-return]

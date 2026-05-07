@@ -8,7 +8,8 @@ import healpy as hp
 
 from .pdf import KingPDF, TemplateSmearedKingPDF
 from .fitting import KingPSFFitter
-from .utils import angular_distance, _interp1d
+import numba
+from .utils import angular_distance, _angular_distance_parallel, _pre_mask_and_distance, _interp1d
 
 
 class KingSpatialLikelihood:
@@ -41,11 +42,12 @@ class KingSpatialLikelihood:
     # Have some place to cache the per-event information so we don't need to
     # recalculate it every time we evaluate the PDF.
     events: Optional[Any] = None
-    event_alpha: Dict[float, npt.NDArray[np.floating]]
-    event_beta: Dict[float, npt.NDArray[np.floating]]
     event_distances: Union[npt.NDArray[np.floating], List[float]]
     map_index: Union[npt.NDArray[np.integer], List[int]]
     event_pvalue: Dict[float, Union[List, npt.NDArray[np.floating]]]
+
+    # Number of CPU threads to use for parallel distance computation (1 = sequential).
+    ncpus: int = 1
 
     # General warning flags
     multiple_source_warning_logged: bool = False
@@ -64,6 +66,7 @@ class KingSpatialLikelihood:
         ],
         angular_cutoff: float = np.pi,
         skymap: Union[npt.NDArray[np.floating], None] = None,
+        ncpus: int = 1,
         cache_parameters: bool = True,
         cache_name: str = "./king_parameters_cache.npz",
         remove_weight_outliers=True,
@@ -81,9 +84,10 @@ class KingSpatialLikelihood:
         # passed in a number of bins instead of actual bin edges.
         self.spectral_indices = np.atleast_1d(spectral_indices)
         self.skymap = skymap
+        self.ncpus = ncpus
+        numba.set_num_threads(self.ncpus)
 
         # Set some default values for the event-level parameters.
-        self.event_alpha, self.event_beta = {}, {}
         self.event_distances, self.map_index = [], []
         self.event_pvalue = {}
 
@@ -147,22 +151,31 @@ class KingSpatialLikelihood:
 
         return
 
-    def events_match(self, events: npt.NDArray[Any]):
-        return str(self.events) == str(events)
+    def events_match(self, events: npt.NDArray[Any]) -> bool:
+        # return self.events is events
+        if self.events is None:
+            return False
+        if events is None:
+            return True
+        result = np.array_equal(self.events["ra"][::10], events["ra"][::10])
+
+        return result
 
     def set_events(
         self,
         events: npt.NDArray[Any],
         source_ras: Optional[npt.NDArray[np.floating]] = None,
         source_decs: Optional[npt.NDArray[np.floating]] = None,
+        die_after=None,
     ) -> None:
-        """Calculate the King distribution parameters (alpha and beta) for a given set of events by interpolating
-        the fitted parameters based on the event parameters and the provided binning. Then calculate the pvalues
-        for each spectral index for each event and store them so we can interpolate them at runtime.
+        """Calculate per-event pvalues for each spectral index by interpolating
+        the King PDF at the nearest parametrization bin for each event.
         """
         if self.events_match(events):
             return
 
+        if die_after == "a":
+            return
         self.events = events
         self.source_ras = source_ras
         self.source_decs = source_decs
@@ -191,31 +204,6 @@ class KingSpatialLikelihood:
                 "that these arrays have the same length when passing into set_events."
             )
 
-        # Calculate the angular distance between events and sources
-        self.event_distances = angular_distance(
-            events["ra"], events["dec"], source_ras, source_decs
-        )
-        self.event_mask = self.event_distances < self.king_pdf.angular_cutoff
-        self.event_distances = self.event_distances[self.event_mask]
-        events = events[self.event_mask]
-
-        # Interpolate to get the alpha and beta values for each spectral index for
-        # each event in the given sample.
-        def index(centers, values):
-            i = np.searchsorted(centers, values).clip(1, len(centers) - 1)
-            return np.where(values - centers[i - 1] < centers[i] - values, i - 1, i)
-
-        event_indices = [index(self.bin_centers[i], events[key]) for i, key in enumerate(self.keys)]
-        for i, gamma in enumerate(self.spectral_indices):
-            self.event_alpha[gamma] = self.alpha_values[i][*event_indices]
-            self.event_beta[gamma] = self.beta_values[i][*event_indices]
-
-        # Start calculating the pvalues.
-        # TODO: By assuming keys "ra" and "dec" exist and are usable here, we're
-        # implicitly building in an IceCube-centric assumption. Ideally, we want
-        # to make this code more generic. This will require us to accept the names
-        # of these as configurable parameters.
-
         if (not self.multiple_source_warning_logged) and (len(source_ras) > 1):
             logging.warning(
                 "Multiple source positions provided. This has not been tested and"
@@ -223,10 +211,57 @@ class KingSpatialLikelihood:
             )
             self.multiple_source_warning_logged = True
 
-        for gamma in self.spectral_indices:
-            self.event_pvalue[gamma] = self.king_pdf.pdf(
-                self.event_distances, self.event_alpha[gamma], self.event_beta[gamma]
-            )  # type: ignore[assignment, arg-type]
+        if die_after == "b":
+            return
+
+        # Calculate angular distances and build event_mask. For the common
+        # single-source case with a sub-pi cutoff, a single parallel numba pass
+        # does the rectangular (dec, RA) pre-filter and the haversine together,
+        # reading each event's ra/dec only once. The multi-source fallback uses
+        # the vectorized sequential/parallel distance function directly.
+        cutoff = self.king_pdf.angular_cutoff
+        if len(source_ras) == 1 and cutoff < np.pi:
+            src_ra = float(source_ras[0])
+            src_dec = float(source_decs[0])
+            ra_span = min(cutoff / max(abs(np.cos(src_dec)), np.sin(cutoff)), np.pi)
+            if die_after == "c":
+                return
+
+            dists_all = _pre_mask_and_distance(
+                events["ra"], events["dec"], src_ra, src_dec, cutoff, ra_span
+            )
+            if die_after == "d":
+                return
+
+            self.event_mask = dists_all >= 0
+            self.event_distances = dists_all[self.event_mask]
+        else:
+            dist_fn = angular_distance if self.ncpus <= 1 else _angular_distance_parallel
+            all_dists = dist_fn(events["ra"], events["dec"], source_ras, source_decs)
+            self.event_mask = all_dists < cutoff
+            self.event_distances = all_dists[self.event_mask]
+
+        # Nearest-bin lookup. Field-first masking (events[key][mask]) avoids
+        # copying the full structured array before extracting each field.
+        def index(centers, values):
+            i = np.searchsorted(centers, values).clip(1, len(centers) - 1)
+            return np.where(values - centers[i - 1] < centers[i] - values, i - 1, i)
+
+        event_indices = tuple(
+            index(self.bin_centers[i], events[key][self.event_mask])
+            for i, key in enumerate(self.keys)
+        )
+        if die_after == "e":
+            return
+
+        all_alpha = self.alpha_values[(slice(None), *event_indices)]
+        all_beta = self.beta_values[(slice(None), *event_indices)]
+        all_pvalues = self.king_pdf.pdf(self.event_distances, all_alpha, all_beta)
+        for i, gamma in enumerate(self.spectral_indices):
+            self.event_pvalue[gamma] = all_pvalues[i]
+        if die_after == "f":
+            return
+
         return
 
     def evaluate_pdf(self, events: npt.NDArray[Any], gamma: float = 2) -> npt.NDArray[np.floating]:
