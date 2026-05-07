@@ -440,28 +440,6 @@ class KingPSFFitter:
             self.fit_beta[param_idx] = best_params[1]
             self.fit_quality[param_idx] = best_chi2
 
-            """
-            print("reduce chi2", best_chi2, "idx", param_idx)
-            if best_chi2 > 20:
-                print("Best fit values:", best_params)
-                import matplotlib.pyplot as plt
-                expected = self.king_pdf.pdf(bin_centers, *best_params)
-                expected *= (hist/delta).sum() / expected.sum()
-                fig, ax = plt.subplots()
-                ax.hist(dpsi_bins[:-1], bins=dpsi_bins, weights=hist/delta, histtype='step', label='obs')
-                ax.scatter(bin_centers, expected, label='best fit')
-                ax.set_xscale('log')
-                ax.set_yscale('log')
-                plt.show()
-
-                fig, ax = plt.subplots()
-                expected = self.king_pdf.cdf(bin_centers, *best_params)
-                ax.hist(dpsi_bins[:-1], bins=dpsi_bins, weights=np.cumsum(hist), histtype='step', label='obs')
-                ax.scatter(bin_centers, expected, label='best fit cdf')
-                ax.set_xscale('log')
-                plt.show()
-            """
-
             # Store histogram data (pad/truncate to match storage size).
             # Make sure to rescale by the phase space to get densities.
             n_store = min(len(hist), self.dpsi_nbins)

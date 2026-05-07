@@ -166,7 +166,6 @@ class KingSpatialLikelihood:
         events: npt.NDArray[Any],
         source_ras: Optional[npt.NDArray[np.floating]] = None,
         source_decs: Optional[npt.NDArray[np.floating]] = None,
-        die_after=None,
     ) -> None:
         """Calculate per-event pvalues for each spectral index by interpolating
         the King PDF at the nearest parametrization bin for each event.
@@ -174,8 +173,6 @@ class KingSpatialLikelihood:
         if self.events_match(events):
             return
 
-        if die_after == "a":
-            return
         self.events = events
         self.source_ras = source_ras
         self.source_decs = source_decs
@@ -211,9 +208,6 @@ class KingSpatialLikelihood:
             )
             self.multiple_source_warning_logged = True
 
-        if die_after == "b":
-            return
-
         # Calculate angular distances and build event_mask. For the common
         # single-source case with a sub-pi cutoff, a single parallel numba pass
         # does the rectangular (dec, RA) pre-filter and the haversine together,
@@ -224,15 +218,9 @@ class KingSpatialLikelihood:
             src_ra = float(source_ras[0])
             src_dec = float(source_decs[0])
             ra_span = min(cutoff / max(abs(np.cos(src_dec)), np.sin(cutoff)), np.pi)
-            if die_after == "c":
-                return
-
             dists_all = _pre_mask_and_distance(
                 events["ra"], events["dec"], src_ra, src_dec, cutoff, ra_span
             )
-            if die_after == "d":
-                return
-
             self.event_mask = dists_all >= 0
             self.event_distances = dists_all[self.event_mask]
         else:
@@ -251,16 +239,12 @@ class KingSpatialLikelihood:
             index(self.bin_centers[i], events[key][self.event_mask])
             for i, key in enumerate(self.keys)
         )
-        if die_after == "e":
-            return
 
         all_alpha = self.alpha_values[(slice(None), *event_indices)]
         all_beta = self.beta_values[(slice(None), *event_indices)]
         all_pvalues = self.king_pdf.pdf(self.event_distances, all_alpha, all_beta)
         for i, gamma in enumerate(self.spectral_indices):
             self.event_pvalue[gamma] = all_pvalues[i]
-        if die_after == "f":
-            return
 
         return
 
